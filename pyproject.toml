@@ -1,0 +1,52 @@
+[project]
+name = "feetech-cli"
+version = "0.1.0"
+description = "Command line tool to inspect and configure FEETECH STS/SMS/SCS serial bus servos"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Iori Yanokura", email = "ab.ioryz@gmail.com" }]
+keywords = ["feetech", "sts3215", "servo", "robotics", "serial"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Hardware",
+]
+dependencies = [
+    "pyserial>=3.5",
+    "colorama>=0.4.6",
+    "readchar>=4.0.5",
+]
+
+[project.scripts]
+feetech = "feetech_cli.cli:main"
+feetech-cli = "feetech_cli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/iory/feetech-cli"
+Issues = "https://github.com/iory/feetech-cli/issues"
+
+[dependency-groups]
+dev = ["pytest>=7.0", "ruff>=0.5"]
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["feetech_cli*"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+force-single-line = true
