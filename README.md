@@ -46,13 +46,64 @@ is running, so a simulation is never mistaken for a real bus.
 
 ## Changing a servo id
 
-The usual case — one servo on the bus, currently id 1, that should become id 5:
+New STS3215 servos all leave the factory as **id 1 at 1 Mbps**. Every servo on
+a bus needs its own id, so a robot with several servos starts with giving each
+one a different id — **one servo at a time**.
 
-```console
-$ feetech set-id 1 5
-Change servo 1 to id 5? This writes the servo EEPROM. [y/N] y
-Servo 1 is now id 5.
-```
+### Walkthrough: numbering a batch of new servos
+
+1. **Connect exactly one servo** to the USB adapter, and power the adapter
+   from its own supply. USB alone does not power a servo.
+
+2. Check that it answers, and at which id:
+
+   ```console
+   $ feetech scan
+   Found 1 servo(s) on /dev/ttyUSB0 at 1.00Mbps:
+     id   1  model   777  position  2048 (+0.0 deg)  12.1V  35C
+   ```
+
+3. Give it its new id. Numbering three servos 1, 2 and 3, the first one can
+   keep id 1; the second becomes 2:
+
+   ```console
+   $ feetech set-id 1 2
+   Change servo 1 to id 2? This writes the servo EEPROM. [y/N] y
+   Servo 1 is now id 2.
+   ```
+
+   The id is stored in EEPROM, so it survives a power cycle.
+
+4. **Label the servo** with its new id (a piece of masking tape is enough).
+   Once they are mixed up, the only way to tell them apart again is to connect
+   them one by one.
+
+5. Unplug it, connect the next new servo, and repeat from step 2 with the
+   next id (`feetech set-id 1 3` for the third).
+
+6. With every servo numbered, daisy-chain them all and check the whole set
+   answers:
+
+   ```console
+   $ feetech scan
+   Found 3 servo(s) on /dev/ttyUSB0 at 1.00Mbps:
+     id   1  model   777  position  2048 (+0.0 deg)  12.1V  35C
+     id   2  model   777  position  2048 (+0.0 deg)  12.1V  35C
+     id   3  model   777  position  2048 (+0.0 deg)  12.1V  35C
+   ```
+
+**Why one at a time.** Two new servos on the same bus both answer to id 1.
+Their replies collide, and a write addressed to id 1 reaches both of them:
+`set-id 1 2` would renumber both servos to 2, and the check that follows
+would find "a servo at id 2" and report success. `set-id` cannot tell one
+servo at an id from two, so keeping a single unnumbered servo on the bus is
+up to you.
+
+If `scan` finds nothing, the servo may have been set to another bus speed
+before. `feetech scan --all-baudrates` tries every speed. Servos with an id
+above 16 need `--max-id 253`.
+
+### What set-id does
 
 `set-id` refuses an id that another servo on the bus already answers to,
 switches torque off first, unlocks the EEPROM, writes, locks it again, and
@@ -379,6 +430,8 @@ Sources:
 - AkariGroup feetech_setup (baud table): https://github.com/AkariGroup/feetech_setup/blob/main/set_baudrate.py
 - LeRobot control table and sign-magnitude encodings: https://github.com/huggingface/lerobot/blob/main/src/lerobot/motors/feetech/tables.py
 - FEETECH start tutorial: https://www.feetechrc.com/Data/feetechrc/upload/file/20201127/start%20%20tutorial201015.pdf
+- Factory default id 1: https://www.waveshare.com/wiki/ST3215_Servo ; id 1 and 1 Mbps: the STS3215 register reference above
+- LeRobot SO-101 assembly, numbering the motors one at a time: https://huggingface.co/docs/lerobot/main/en/assemble_so101
 
 [lerobot]: https://github.com/huggingface/lerobot/blob/main/src/lerobot/motors/feetech/tables.py
 
