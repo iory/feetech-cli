@@ -6,14 +6,17 @@ or watch a live status screen.
 
 ## Install
 
-```console
-$ pip install feetech-cli
-```
-
-or, to keep it in its own environment with the `feetech` command on your path:
+With [uv](https://docs.astral.sh/uv/), which installs the `feetech` command in its
+own environment and on your path:
 
 ```console
 $ uv tool install feetech-cli
+```
+
+or with pip:
+
+```console
+$ pip install feetech-cli
 ```
 
 The package is also a Python library: `from feetech_cli import FeetechServoController`.
