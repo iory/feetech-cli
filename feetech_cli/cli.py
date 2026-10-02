@@ -20,6 +20,7 @@ from feetech_cli.registers import INFO_REGISTERS
 from feetech_cli.registers import OPERATING_MODES
 from feetech_cli.registers import degree_to_position
 from feetech_cli.registers import format_baud
+from feetech_cli.registers import format_current
 from feetech_cli.registers import position_to_degree
 from feetech_cli.tui import ServoTui
 
@@ -411,13 +412,16 @@ def command_info(args, controller):
         value = values[name]
         print(
             "  {:<{width}}  addr {:>3}  {}".format(
-                name, register.address, _annotate(name, value), width=width
+                name,
+                register.address,
+                _annotate(name, value, values),
+                width=width,
             )
         )
     return 0
 
 
-def _annotate(name, value):
+def _annotate(name, value, context=None):
     """Render a register value with a unit or label where one applies.
 
     Parameters
@@ -426,6 +430,9 @@ def _annotate(name, value):
         Register name.
     value : int or None
         Register value.
+    context : dict or None, optional
+        Other register values of the same servo. ``present_current`` uses
+        ``model_number`` and ``present_load`` from it.
 
     Returns
     -------
@@ -450,7 +457,10 @@ def _annotate(name, value):
     if name == "present_load":
         return f"{value} ({value / 10.0:+.1f} %)"
     if name == "present_current":
-        return f"{value} ({value * 6.5:.0f} mA)"
+        context = context or {}
+        return format_current(
+            value, context.get("model_number"), context.get("present_load")
+        )
     if name == "torque_enable":
         return "{} ({})".format(value, "on" if value else "off")
     if name == "lock":
@@ -532,7 +542,10 @@ def command_read(args, controller):
         Process exit status.
     """
     value = controller.read_register(args.id, args.register)
-    print(f"{args.register} = {_annotate(args.register, value)}")
+    context = None
+    if args.register == "present_current":
+        context = controller.dump(args.id, ["model_number", "present_load"])
+    print(f"{args.register} = {_annotate(args.register, value, context)}")
     return 0
 
 
