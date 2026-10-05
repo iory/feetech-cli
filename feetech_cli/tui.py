@@ -16,6 +16,7 @@ from feetech_cli.registers import CENTER_POSITION
 from feetech_cli.registers import OPERATING_MODES
 from feetech_cli.registers import RESOLUTION
 from feetech_cli.registers import format_baud
+from feetech_cli.registers import format_current
 from feetech_cli.registers import position_to_degree
 
 #: Encoder counts moved per arrow key press, about five degrees.
@@ -69,6 +70,8 @@ STATUS_REGISTERS = [
     "present_voltage",
     "present_temperature",
     "present_current",
+    # Only needed to pick the mA scale for present_current.
+    "model_number",
     "torque_enable",
     "operating_mode",
     "moving",
@@ -603,7 +606,9 @@ class ServoTui:
             current = values.get("present_current")
             if current is None:
                 return "no data"
-            return f"{current} ({current * 6.5:.0f} mA)"
+            return format_current(
+                current, values.get("model_number"), values.get("present_load")
+            )
         if row == "Torque":
             torque = values.get("torque_enable")
             if torque is None:

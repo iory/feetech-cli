@@ -126,7 +126,9 @@ CONTROL_TABLE = {
     "async_write_flag": _sram(64, 1, writable=False),
     "status": _sram(65, 1, writable=False),
     "moving": _sram(66, 1, writable=False),
-    "present_current": _sram(69, 2, writable=False),
+    # Bit 15 carries the sign, as in FEETECH's SMS_STS::ReadCurrent:
+    # https://github.com/adityakamath/SCServo_Linux/blob/main/src/SMS_STS.cpp
+    "present_current": _sram(69, 2, writable=False, sign_bit=15),
 }
 
 #: Register value 0-7 written to ``baud_rate`` and the bus speed it selects.
@@ -160,6 +162,26 @@ OPERATING_MODES = {
     2: "pwm",
     3: "step",
 }
+
+#: ``(milliamps per count, what is measured)`` of ``present_current``, by
+#: ``model_number``. Only models whose scale is backed by a document are
+#: listed; for any other model the count is shown without a conversion rather
+#: than with a guessed one.
+#:
+#: - 777 (STS3215): 6.5 mA,
+#:   https://www.mantech.co.za/datasheets/products/sts3215-200620a-1.pdf
+#: - 4618 (HLS series, seen on an HLS3960M): 6.5 mA of motor *phase* current,
+#:   not supply current. At a low PWM duty the phase current is far larger
+#:   than what the power supply delivers. Source is a third party transcript
+#:   of the HLS memory table, not a FEETECH document:
+#:   https://wiki.aifitlab.com/feetech-servo-motor-docs/feetech-hls-servo-memory-table-analysis
+CURRENT_MA_PER_COUNT = {
+    777: (6.5, "supply"),
+    4618: (6.5, "phase"),
+}
+
+#: ``present_load`` count that means 100 % PWM duty (the unit is 0.1 %).
+LOAD_FULL_SCALE = 1000
 
 #: Encoder counts per full turn for the STS/SMS series.
 RESOLUTION = 4096
@@ -265,3 +287,41 @@ def format_baud(baud):
     if baud >= 1000:
         return f"{baud / 1000:.0f}k"
     return str(baud)
+
+
+def format_current(current, model, load=None):
+    """Render a ``present_current`` reading, in mA when the scale is known.
+
+    For a model that reports motor phase current, the current drawn from the
+    power supply is also estimated as ``|phase current| * |PWM duty|``, the
+    duty being ``present_load`` in 0.1 % steps. The estimate ignores driver
+    losses and the servo's own idle draw, so it is a rough figure only.
+
+    Parameters
+    ----------
+    current : int
+        Signed ``present_current`` count.
+    model : int or None
+        ``model_number`` of the servo, ``None`` if it could not be read.
+    load : int or None, optional
+        Signed ``present_load`` count, needed for the supply estimate.
+
+    Returns
+    -------
+    str
+        For example ``"-147 (-956 mA)"``, ``"-506 (-3289 mA phase, ~987 mA
+        supply est.)"`` for a model that reports motor phase current, or
+        ``"-147 (mA scale unknown for model 1234)"`` when
+        :data:`CURRENT_MA_PER_COUNT` has no entry.
+    """
+    entry = CURRENT_MA_PER_COUNT.get(model)
+    if entry is None:
+        return f"{current} (mA scale unknown for model {model})"
+    scale, kind = entry
+    milliamps = current * scale
+    if kind != "phase":
+        return f"{current} ({milliamps:.0f} mA)"
+    if load is None:
+        return f"{current} ({milliamps:.0f} mA phase)"
+    supply = abs(milliamps) * abs(load) / LOAD_FULL_SCALE
+    return f"{current} ({milliamps:.0f} mA phase, ~{supply:.0f} mA supply est.)"
