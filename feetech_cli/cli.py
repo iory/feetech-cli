@@ -9,11 +9,15 @@ from colorama import Style
 
 from feetech_cli.controller import FeetechServoController
 from feetech_cli.controller import list_candidate_ports
+from feetech_cli.devices import SERVO
+from feetech_cli.devices import DeviceFileError
+from feetech_cli.devices import default_device_dir
+from feetech_cli.devices import format_value
+from feetech_cli.devices import load_profiles
 from feetech_cli.protocol import FeetechError
 from feetech_cli.registers import BAUDRATE_INDEX
 from feetech_cli.registers import BAUDRATE_TABLE
 from feetech_cli.registers import CENTER_POSITION
-from feetech_cli.registers import CONTROL_TABLE
 from feetech_cli.registers import DEFAULT_MAX_ID
 from feetech_cli.registers import DEFAULT_MIN_ID
 from feetech_cli.registers import INFO_REGISTERS
@@ -69,6 +73,14 @@ def build_parser():
         help="talk to the older big endian SCS series instead of STS/SMS",
     )
     parser.add_argument(
+        "--device-file", action="append", default=[], metavar="PATH",
+        help=(
+            "JSON file (or directory of them) describing a non-servo device that "
+            "may share the bus; repeatable. Also read from $FEETECH_CLI_DEVICES "
+            "and ~/.config/feetech-cli/devices/*.json."
+        ),
+    )
+    parser.add_argument(
         "--simulate", action="store_true",
         help=(
             "run against a simulated bus instead of hardware, to try the "
@@ -117,7 +129,11 @@ def build_parser():
     write.add_argument("register", help="register name, see 'feetech registers'")
     write.add_argument("value", type=int, help="value to write")
 
-    sub.add_parser("registers", help="list the register names of the control table")
+    registers = sub.add_parser("registers", help="list the register names of the control table")
+    registers.add_argument(
+        "--device", default="servo",
+        help="whose control table to list: 'servo' (default) or a loaded device file's name",
+    )
 
     move = sub.add_parser("move", help="command a servo to a position")
     move.add_argument("id", type=int, help="servo id")
@@ -232,6 +248,7 @@ def make_controller(args):
         little_endian=not args.scs,
         min_id=args.min_id,
         max_id=args.max_id,
+        device_profiles=args.device_profiles,
     )
 
 
@@ -250,10 +267,18 @@ def attach_simulator(controller, args):
         Parsed arguments.
     """
     from feetech_cli.protocol import PacketHandler
+    from feetech_cli.simulator import SimulatedBoard
     from feetech_cli.simulator import build_demo_bus
 
     baudrate = args.baudrate or 1000000
     bus = build_demo_bus(servo_ids=(1, 2, 3), baudrate=baudrate)
+    # One simulated device per loaded device file, so a new file can be tried
+    # before the hardware exists.
+    boards = []
+    for offset, profile in enumerate(args.device_profiles):
+        if "id" in profile.control_table and "baud_rate" in profile.control_table:
+            boards.append(SimulatedBoard(profile, board_id=10 + offset))
+    bus.servos.extend(boards)
     controller.requested_port = bus.port
     controller.requested_baudrate = baudrate
 
@@ -272,8 +297,9 @@ def attach_simulator(controller, args):
 
     controller._open_port = open_port
     controller.is_simulated = True
+    extra = "".join(f", {b.profile.name} at id {b.servo_id}" for b in boards)
     print(
-        f"{Fore.YELLOW}Simulated bus: three servos at ids 1, 2 and 3. "
+        f"{Fore.YELLOW}Simulated bus: three servos at ids 1, 2 and 3{extra}. "
         f"No hardware is involved.{Style.RESET_ALL}"
     )
 
@@ -335,11 +361,16 @@ def command_scan(args, controller):
     if not found:
         _print_empty_bus(controller)
         return 1
+    profiles = {servo_id: controller.device_profile(servo_id) for servo_id in found}
+    noun = "servo(s)" if all(p.is_servo for p in profiles.values()) else "device(s)"
     print(
-        f"Found {len(found)} servo(s) on {controller.serial.port} "
+        f"Found {len(found)} {noun} on {controller.serial.port} "
         f"at {format_baud(controller.baudrate)}bps:"
     )
     for servo_id in found:
+        if not profiles[servo_id].is_servo:
+            print(_device_summary(controller, servo_id, profiles[servo_id]))
+            continue
         model = controller.read_register(servo_id, "model_number")
         position = controller.read_register(servo_id, "present_position")
         voltage = controller.read_register(servo_id, "present_voltage")
@@ -351,6 +382,70 @@ def command_scan(args, controller):
             f"{voltage / 10.0:.1f}V  {temperature}C"
         )
     return 0
+
+
+def _device_summary(controller, servo_id, profile):
+    """One scan line for a device that is not a servo.
+
+    Parameters
+    ----------
+    controller : FeetechServoController
+        An open controller.
+    servo_id : int
+        Device id.
+    profile : DeviceProfile
+        What the device was identified as.
+
+    Returns
+    -------
+    str
+        The line to print: the device's name, its model and firmware when its
+        device file names them, then its ``summary`` registers.
+    """
+    table = profile.control_table
+    header = [name for name in ("model_number", "firmware_version") if name in table]
+    shown = list(profile.summary_registers)
+    values = controller.dump(servo_id, _with_references(profile, header + shown))
+    details = []
+    if "model_number" in table:
+        model = values["model_number"]
+        details.append("model " + ("?" if model is None else f"0x{model:04X}"))
+    if "firmware_version" in table:
+        details.append(f"fw {_plain_value(values['firmware_version'])}")
+    line = f"  id {servo_id:>3}  {profile.name}"
+    if details:
+        line += f" ({', '.join(details)})"
+    for name in shown:
+        line += f"  {name} {_annotate(name, values[name], values, profile)}"
+    return line
+
+
+def _with_references(profile, names):
+    """Add the registers that ``scale_by`` rules of ``names`` need.
+
+    Parameters
+    ----------
+    profile : DeviceProfile
+        The device's profile.
+    names : list of str
+        Registers about to be shown.
+
+    Returns
+    -------
+    list of str
+        ``names`` followed by any missing reference registers.
+    """
+    out = list(names)
+    for name in names:
+        rule = profile.formats.get(name, {})
+        if "scale_by" in rule and rule["scale_by"][0] not in out:
+            out.append(rule["scale_by"][0])
+    return out
+
+
+def _plain_value(value):
+    """Render an optional register value."""
+    return "?" if value is None else str(value)
 
 
 def resolve_servo_id(controller, servo_id):
@@ -403,25 +498,31 @@ def command_info(args, controller):
         Process exit status.
     """
     servo_id = resolve_servo_id(controller, args.id)
-    names = list(CONTROL_TABLE) if args.all else INFO_REGISTERS
-    values = controller.dump(servo_id, names)
+    profile = controller.device_profile(servo_id)
+    table = profile.control_table
+    if args.all:
+        names = list(table)
+    else:
+        names = list(profile.info_registers or INFO_REGISTERS)
+    values = controller.dump(servo_id, _with_references(profile, names))
     width = max(len(name) for name in names)
-    print(f"Servo {servo_id} on {controller.serial.port} at {format_baud(controller.baudrate)}bps")
+    kind = "Servo" if profile.is_servo else profile.name[:1].upper() + profile.name[1:]
+    print(f"{kind} {servo_id} on {controller.serial.port} at {format_baud(controller.baudrate)}bps")
     for name in names:
-        register = CONTROL_TABLE[name]
+        register = table[name]
         value = values[name]
         print(
             "  {:<{width}}  addr {:>3}  {}".format(
                 name,
                 register.address,
-                _annotate(name, value, values),
+                _annotate(name, value, values, profile),
                 width=width,
             )
         )
     return 0
 
 
-def _annotate(name, value, context=None):
+def _annotate(name, value, context=None, profile=SERVO):
     """Render a register value with a unit or label where one applies.
 
     Parameters
@@ -433,6 +534,9 @@ def _annotate(name, value, context=None):
     context : dict or None, optional
         Other register values of the same servo. ``present_current`` uses
         ``model_number`` and ``present_load`` from it.
+    profile : DeviceProfile, optional
+        The device's kind. For a device file, its own display rules apply and
+        the servo ones never do.
 
     Returns
     -------
@@ -441,6 +545,11 @@ def _annotate(name, value, context=None):
     """
     if value is None:
         return "no data"
+    if not profile.is_servo:
+        if name == "baud_rate" and value in profile.baudrate_table:
+            return f"{value} ({format_baud(profile.baudrate_table[value])}bps)"
+        rendered = format_value(profile, name, value, context)
+        return str(value) if rendered is None else rendered
     if name == "baud_rate":
         baud = BAUDRATE_TABLE.get(value)
         if baud is None:
@@ -483,17 +592,44 @@ def command_set_id(args, controller):
     int
         Process exit status.
     """
+    kind, memory = _kind_and_memory(controller, args.old_id)
     if not confirm(
-        f"Change servo {args.old_id} to id {args.new_id}? This writes the servo EEPROM.",
+        f"Change {kind.lower()} {args.old_id} to id {args.new_id}? This writes the {memory}.",
         args.yes,
     ):
         print("Cancelled.")
         return 1
     confirmed = controller.set_id(args.old_id, args.new_id)
     print(
-        f"{Fore.GREEN}Servo {args.old_id} is now id {confirmed}.{Style.RESET_ALL}"
+        f"{Fore.GREEN}{kind} {args.old_id} is now id {confirmed}.{Style.RESET_ALL}"
     )
     return 0
+
+
+def _kind_and_memory(controller, servo_id):
+    """Name a device and the memory a setting change writes, for messages.
+
+    Parameters
+    ----------
+    controller : FeetechServoController
+        An open controller.
+    servo_id : int
+        Device id.
+
+    Returns
+    -------
+    tuple of (str, str)
+        ``("Servo", "servo EEPROM")`` or, for another kind of device, its
+        capitalised name and ``"board's flash"``.
+    """
+    try:
+        profile = controller.device_profile(servo_id)
+    except FeetechError:
+        # Absent ids are reported by set_id / set_baudrate themselves.
+        return "Servo", "servo EEPROM"
+    if profile.is_servo:
+        return "Servo", "servo EEPROM"
+    return profile.name[:1].upper() + profile.name[1:], "board's flash"
 
 
 def command_set_baud(args, controller):
@@ -511,16 +647,17 @@ def command_set_baud(args, controller):
     int
         Process exit status.
     """
+    kind, memory = _kind_and_memory(controller, args.id)
     if not confirm(
-        f"Set servo {args.id} to {format_baud(args.new_baudrate)}bps? "
-        f"This writes the servo EEPROM.",
+        f"Set {kind.lower()} {args.id} to {format_baud(args.new_baudrate)}bps? "
+        f"This writes the {memory}.",
         args.yes,
     ):
         print("Cancelled.")
         return 1
     confirmed = controller.set_baudrate(args.id, args.new_baudrate)
     print(
-        f"{Fore.GREEN}Servo {args.id} now runs at {format_baud(confirmed)}bps.{Style.RESET_ALL}"
+        f"{Fore.GREEN}{kind} {args.id} now runs at {format_baud(confirmed)}bps.{Style.RESET_ALL}"
     )
     print(f"Pass --baudrate {confirmed} on later calls, or let it be auto detected.")
     return 0
@@ -542,10 +679,14 @@ def command_read(args, controller):
         Process exit status.
     """
     value = controller.read_register(args.id, args.register)
+    profile = controller.device_profile(args.id)
     context = None
-    if args.register == "present_current":
+    if not profile.is_servo:
+        references = _with_references(profile, [args.register])[1:]
+        context = controller.dump(args.id, references) if references else None
+    elif args.register == "present_current":
         context = controller.dump(args.id, ["model_number", "present_load"])
-    print(f"{args.register} = {_annotate(args.register, value, context)}")
+    print(f"{args.register} = {_annotate(args.register, value, context, profile)}")
     return 0
 
 
@@ -573,7 +714,8 @@ def command_write(args, controller):
         )
         return 1
     value = controller.write_register(args.id, args.register, args.value)
-    print(f"{args.register} = {_annotate(args.register, value)}")
+    profile = controller.device_profile(args.id)
+    print(f"{args.register} = {_annotate(args.register, value, None, profile)}")
     if value != args.value:
         print(
             f"{Fore.RED}Read back {value} but {args.value} was written; "
@@ -596,8 +738,18 @@ def command_registers(args):
     int
         Process exit status.
     """
-    width = max(len(name) for name in CONTROL_TABLE)
-    for name, register in sorted(CONTROL_TABLE.items(), key=lambda kv: kv[1].address):
+    known = {SERVO.key: SERVO}
+    known.update({profile.key: profile for profile in args.device_profiles})
+    if args.device not in known:
+        print(
+            f"{Fore.RED}No device '{args.device}'. Known: {', '.join(sorted(known))}. "
+            f"Load its file with --device-file or put it in {default_device_dir()}."
+            f"{Style.RESET_ALL}"
+        )
+        return 1
+    table = known[args.device].control_table
+    width = max(len(name) for name in table)
+    for name, register in sorted(table.items(), key=lambda kv: kv[1].address):
         print(
             "  {:<{width}}  addr {:>3}  {} byte  {:<6}  {}".format(
                 name, register.address, register.size, register.area,
@@ -728,6 +880,13 @@ def command_monitor(args, controller):
         Process exit status.
     """
     found = controller.scan()
+    others = [sid for sid in found if not controller.is_servo(sid)]
+    found = [sid for sid in found if sid not in others]
+    for sid in others:
+        print(
+            f"{Fore.YELLOW}id {sid} is a {controller.device_profile(sid).name}, not a "
+            f"servo; 'feetech info {sid}' shows it.{Style.RESET_ALL}"
+        )
     if not found:
         # Start anyway and wait. A servo plugged in later
         # is picked up without restarting the tool.
@@ -904,6 +1063,11 @@ def main(argv=None):
     colorama.init()
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        args.device_profiles = load_profiles(args.device_file)
+    except DeviceFileError as error:
+        print(f"{Fore.RED}Device file: {error}{Style.RESET_ALL}")
+        return 2
 
     if args.command == "ports":
         return command_ports(args)

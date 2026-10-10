@@ -343,7 +343,7 @@ class ServoTui:
         try:
             if not self.controller.is_open:
                 self.controller.open()
-            found = self.controller.scan()
+            found = self._scan_servos()
         except BUS_ERRORS:
             self.controller.close()
             return False
@@ -829,9 +829,13 @@ class ServoTui:
         self.active_index = self.servo_ids.index(confirmed)
         self.message = f"{Fore.GREEN}Servo {old_id} is now id {confirmed}{Style.RESET_ALL}"
 
+    def _scan_servos(self):
+        """Scan the bus for servos only, see :func:`_scan_servos_of`."""
+        return _scan_servos_of(self.controller)
+
     def rescan(self):
         """Probe the bus again and refresh the list of known servos."""
-        found = self.controller.scan()
+        found = self._scan_servos()
         if not found:
             self.message = f"{Fore.RED}No servo answered on the bus{Style.RESET_ALL}"
             return
@@ -842,6 +846,16 @@ class ServoTui:
         self.message = "Found servo ids: {}".format(
             " ".join(str(sid) for sid in found)
         )
+
+
+def _scan_servos_of(controller):
+    """Scan the bus and keep only the ids that are servos.
+
+    The status screen drives servo registers. Another kind of device on the
+    same bus (a sensor board, say) has different registers at those addresses,
+    so it is left out rather than shown with meaningless values.
+    """
+    return [sid for sid in controller.scan() if controller.is_servo(sid)]
 
 
 def _plain(value):

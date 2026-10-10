@@ -5,8 +5,12 @@ import time
 import serial
 import serial.tools.list_ports
 
+from feetech_cli.devices import SERVO
+from feetech_cli.devices import identify
+from feetech_cli.devices import identity_span
 from feetech_cli.protocol import BROADCAST_ID
 from feetech_cli.protocol import FeetechError
+from feetech_cli.protocol import FeetechStatusError
 from feetech_cli.protocol import PacketHandler
 from feetech_cli.protocol import describe_error
 from feetech_cli.protocol import from_sign_magnitude
@@ -104,6 +108,7 @@ class FeetechServoController:
         little_endian=True,
         min_id=DEFAULT_MIN_ID,
         max_id=DEFAULT_MAX_ID,
+        device_profiles=(),
     ):
         self.requested_port = port
         self.requested_baudrate = baudrate
@@ -120,6 +125,11 @@ class FeetechServoController:
         #: Servos whose ``response_status_level`` is 0 and which therefore
         #: never answer a write instruction.
         self.silent_servos = set()
+        #: :class:`~feetech_cli.devices.DeviceProfile` of each id seen so far.
+        self.profiles = {}
+        #: Device files loaded for this bus (:func:`~feetech_cli.devices.load_profiles`).
+        #: Empty means every id is a servo and nothing is probed.
+        self.device_profiles = list(device_profiles)
 
     # -- connection --------------------------------------------------------
 
@@ -310,6 +320,8 @@ class FeetechServoController:
         for servo_id in range(min_id, max_id + 1):
             if servo_id == BROADCAST_ID:
                 continue
+            # Whatever answered here before may have been swapped out.
+            self.profiles.pop(servo_id, None)
             answered = self.packet_handler.ping(servo_id)
             if answered:
                 found.append(servo_id)
@@ -353,6 +365,53 @@ class FeetechServoController:
         self.reopen(best_baudrate or original_baudrate)
         return results
 
+    # -- device identification --------------------------------------------
+
+    def device_profile(self, servo_id):
+        """Identify the device answering at an id.
+
+        The answer is cached, so the identity read happens once per id.
+
+        Parameters
+        ----------
+        servo_id : int
+            Device id.
+
+        Returns
+        -------
+        DeviceProfile
+            What kind of device it is.
+        """
+        self._require_open()
+        profile = self.profiles.get(servo_id)
+        if profile is None:
+            span = identity_span(self.device_profiles)
+            if span == 0:
+                # No device files: every id is a servo, as it always was.
+                profile = SERVO
+            else:
+                identity = self.packet_handler.read(servo_id, 0, span)
+                profile = identify(identity, self.device_profiles)
+            self.profiles[servo_id] = profile
+        return profile
+
+    def is_servo(self, servo_id):
+        """Return whether the device at ``servo_id`` is a FEETECH servo."""
+        return self.device_profile(servo_id).is_servo
+
+    def _require_servo(self, servo_id):
+        """Raise unless the device at ``servo_id`` is a servo.
+
+        Servo commands write servo registers. On another kind of device those
+        addresses mean something else, so they are refused up front.
+        """
+        profile = self.device_profile(servo_id)
+        if not profile.is_servo:
+            raise FeetechError(
+                f"id {servo_id} is a {profile.name}, not a servo; this command only "
+                "applies to servos"
+            )
+
     # -- register access ---------------------------------------------------
 
     def read_register(self, servo_id, name):
@@ -372,11 +431,15 @@ class FeetechServoController:
             The register value, sign decoded where applicable.
         """
         self._require_open()
-        register = _lookup(name)
+        register = _lookup(name, self.device_profile(servo_id))
         data = self.packet_handler.read(servo_id, register.address, register.size)
         value = self.packet_handler.decode(register.size, data)
         if register.sign_bit is not None:
             return from_sign_magnitude(value, register.sign_bit)
+        if register.twos_complement:
+            bits = 8 * register.size
+            if value & (1 << (bits - 1)):
+                value -= 1 << bits
         return value
 
     def write_register(self, servo_id, name, value):
@@ -401,15 +464,26 @@ class FeetechServoController:
             The value read back from the servo.
         """
         self._require_open()
-        register = _lookup(name)
+        profile = self.device_profile(servo_id)
+        register = _lookup(name, profile)
         if not register.writable:
             raise FeetechError(f"register '{name}' is read only")
-        if register.area == "eeprom":
+        locked = profile.has_eeprom_lock and register.area == "eeprom"
+        if locked:
             self.unlock_eeprom(servo_id)
         try:
             self._write_raw(servo_id, register, value)
+        except FeetechStatusError as error:
+            if profile.is_servo:
+                raise
+            # The servo error bits mean nothing here: a non-zero status from
+            # a board is its refusal of the write.
+            raise FeetechError(
+                f"{profile.name} {servo_id} refused the write to '{name}' "
+                f"(status 0x{error.error:02X})"
+            ) from error
         finally:
-            if register.area == "eeprom":
+            if locked:
                 self.lock_eeprom(servo_id)
         return self.read_register(servo_id, name)
 
@@ -434,6 +508,8 @@ class FeetechServoController:
         """
         if register.sign_bit is not None:
             value = to_sign_magnitude(value, register.sign_bit)
+        if register.twos_complement:
+            value &= (1 << (8 * register.size)) - 1
         if expect_status is None:
             expect_status = servo_id not in self.silent_servos
         data = self.packet_handler.encode(register.size, value)
@@ -505,7 +581,7 @@ class FeetechServoController:
             mapped to ``None``.
         """
         if names is None:
-            names = list(CONTROL_TABLE)
+            names = list(self.device_profile(servo_id).control_table)
         result = {}
         for name in names:
             try:
@@ -554,6 +630,10 @@ class FeetechServoController:
         if not self.ping(servo_id):
             raise FeetechError(f"no servo answered at id {servo_id}")
 
+        profile = self.device_profile(servo_id)
+        if not profile.is_servo:
+            return self._set_device_id(servo_id, new_id, profile)
+
         self.set_torque(servo_id, False)
         self.unlock_eeprom(servo_id)
         try:
@@ -573,6 +653,42 @@ class FeetechServoController:
                 f"servo did not answer at the new id {new_id}. It may still be at id "
                 f"{servo_id}; power cycle and rescan the bus."
             )
+        self.profiles[new_id] = self.profiles.pop(servo_id, profile)
+        return self.read_register(new_id, "id")
+
+    def _wait_for(self, servo_id, settle_time):
+        """Ping until a device answers or ``settle_time`` runs out.
+
+        Returns
+        -------
+        bool
+            Whether the device answered.
+        """
+        deadline = time.monotonic() + settle_time
+        while True:
+            if self.ping(servo_id):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    def _set_device_id(self, servo_id, new_id, profile):
+        """Change the id of a device that is not a servo.
+
+        No torque and no EEPROM lock: the profile's own ``id`` register is
+        written directly. The device may go silent while it commits the change
+        (:attr:`~feetech_cli.devices.DeviceProfile.settle_time`), so the new id
+        is polled rather than pinged once.
+        """
+        self._write_raw(servo_id, _lookup("id", profile), new_id, expect_status=False)
+        if not self._wait_for(new_id, profile.settle_time):
+            raise FeetechError(
+                f"{profile.name} did not answer at the new id {new_id} within "
+                f"{profile.settle_time:.1f} s. It may still be at id {servo_id}; rescan "
+                "the bus."
+            )
+        self.profiles.pop(servo_id, None)
+        self.profiles[new_id] = profile
         return self.read_register(new_id, "id")
 
     def set_baudrate(self, servo_id, baudrate):
@@ -611,6 +727,28 @@ class FeetechServoController:
             raise FeetechError(f"no servo answered at id {servo_id}")
 
         index = BAUDRATE_INDEX[baudrate]
+        profile = self.device_profile(servo_id)
+        if not profile.is_servo:
+            # A device file may number its speeds differently from the servos.
+            indices = {rate: value for value, rate in profile.baudrate_table.items()}
+            if baudrate not in indices:
+                raise FeetechError(
+                    f"{profile.name} {servo_id} does not support {baudrate} baud "
+                    f"(its device file lists {sorted(indices)})"
+                )
+            index = indices[baudrate]
+            self._write_raw(
+                servo_id, _lookup("baud_rate", profile), index, expect_status=False
+            )
+            self.reopen(baudrate)
+            if not self._wait_for(servo_id, profile.settle_time):
+                raise FeetechError(
+                    f"{profile.name} {servo_id} did not answer at {baudrate} baud within "
+                    f"{profile.settle_time:.1f} s. Rescan the bus with "
+                    "'feetech scan --all-baudrates'."
+                )
+            return profile.baudrate_table[self.read_register(servo_id, "baud_rate")]
+
         self.set_torque(servo_id, False)
         self.unlock_eeprom(servo_id)
         try:
@@ -640,6 +778,7 @@ class FeetechServoController:
         servo_id : int
             Servo id.
         """
+        self._require_servo(servo_id)
         self._require_open()
         self.set_torque(servo_id, False)
         self.packet_handler.factory_reset(
@@ -664,6 +803,7 @@ class FeetechServoController:
         int
             The ``torque_enable`` value read back.
         """
+        self._require_servo(servo_id)
         self._write_raw(servo_id, _lookup("torque_enable"), 1 if enable else 0)
         time.sleep(0.01)
         return self.read_register(servo_id, "torque_enable")
@@ -683,6 +823,7 @@ class FeetechServoController:
         int
             The commanded position.
         """
+        self._require_servo(servo_id)
         position = int(position)
         self._write_raw(servo_id, _lookup("goal_position"), position)
         return position
@@ -709,6 +850,16 @@ class FeetechServoController:
         acceleration : int, optional
             Acceleration ramp, 0-254.
         """
+        for servo_id in servo_ids:
+            # An id that does not answer is skipped by the sync write itself,
+            # as before. Only a device known to be something else is refused:
+            # a position slice would land on its registers.
+            try:
+                profile = self.device_profile(servo_id)
+            except FeetechError:
+                continue
+            if not profile.is_servo:
+                self._require_servo(servo_id)
         self._require_open()
         handler = self.packet_handler
         entries = []
@@ -743,6 +894,7 @@ class FeetechServoController:
         int
             The commanded velocity.
         """
+        self._require_servo(servo_id)
         velocity = int(velocity)
         self._write_raw(servo_id, _lookup("goal_velocity"), velocity)
         return velocity
@@ -762,6 +914,7 @@ class FeetechServoController:
         int
             The commanded acceleration.
         """
+        self._require_servo(servo_id)
         acceleration = max(0, min(254, int(acceleration)))
         self._write_raw(servo_id, _lookup("acceleration"), acceleration)
         return acceleration
@@ -783,6 +936,7 @@ class FeetechServoController:
         int
             The position the servo came to rest at.
         """
+        self._require_servo(servo_id)
         deadline = time.monotonic() + timeout
         last = self.read_register(servo_id, "present_position")
         still_since = None
@@ -813,6 +967,7 @@ class FeetechServoController:
         list of tuple
             ``(name, ok, detail)`` for each check, in report order.
         """
+        self._require_servo(servo_id)
         values = self.dump(
             servo_id,
             [
@@ -874,6 +1029,7 @@ class FeetechServoController:
             ``checks`` from :meth:`preflight`, a ``moves`` list of per move
             dicts, and ``passed``.
         """
+        self._require_servo(servo_id)
         checks = self.preflight(servo_id)
         low = self.read_register(servo_id, "min_position_limit")
         high = self.read_register(servo_id, "max_position_limit")
@@ -965,6 +1121,7 @@ class FeetechServoController:
             If the required offset falls outside the range the register can
             hold, which happens when the pose is too far from the target.
         """
+        self._require_servo(servo_id)
         self._require_open()
         offset = self.read_register(servo_id, "homing_offset")
         present = self.read_register(servo_id, "present_position")
@@ -1004,17 +1161,20 @@ class FeetechServoController:
         int
             The mode read back from the servo.
         """
+        self._require_servo(servo_id)
         self.set_torque(servo_id, False)
         return self.write_register(servo_id, "operating_mode", mode)
 
 
-def _lookup(name):
+def _lookup(name, profile=None):
     """Return the control table entry for a register name.
 
     Parameters
     ----------
     name : str
         Register name.
+    profile : DeviceProfile or None, optional
+        Device whose table to use. ``None`` means a servo.
 
     Returns
     -------
@@ -1026,6 +1186,8 @@ def _lookup(name):
     FeetechError
         If the name is not in the control table.
     """
-    if name not in CONTROL_TABLE:
-        raise FeetechError(f"unknown register '{name}'")
-    return CONTROL_TABLE[name]
+    table = CONTROL_TABLE if profile is None else profile.control_table
+    if name not in table:
+        kind = "servo" if profile is None else profile.name
+        raise FeetechError(f"unknown register '{name}' for a {kind}")
+    return table[name]

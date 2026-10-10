@@ -441,3 +441,77 @@ Sources:
 ## License
 
 MIT
+
+## Other devices on the bus
+
+A FEETECH bus can carry more than servos: any board that speaks the same
+framing can sit next to the joints it works with. Its control table is its
+own, though, and reading it through the servo table gives nonsense (an id of
+48, a 250 kbps speed) while writing through it corrupts the board.
+
+feetech-cli itself only knows FEETECH servos. Any other device is described by
+a JSON **device file**, normally shipped by whoever makes the device, and
+loaded from
+
+1. `--device-file PATH` (a file or a directory of them, repeatable),
+2. `$FEETECH_CLI_DEVICES` (files or directories, separated like `PATH`),
+3. `~/.config/feetech-cli/devices/*.json` (or `$XDG_CONFIG_HOME/...`).
+
+With a device file loaded, every id is identified once by reading the bytes its
+`match` names; a match gets the file's control table, everything else is a
+servo as before. With none loaded nothing extra is sent on the bus.
+
+```json
+{
+  "name": "Example sensor board",
+  "match": {"address": 0, "bytes": "3412455842"},
+  "settle_time": 1.0,
+  "registers": {
+    "model_number": {"address": 0, "size": 2},
+    "id":        {"address": 7, "size": 1, "writable": true},
+    "baud_rate": {"address": 8, "size": 1, "writable": true},
+    "mode":      {"address": 20, "size": 1, "writable": true,
+                  "values": {"0": "off", "1": "on"}},
+    "pressure":  {"address": 24, "size": 2, "signed": true,
+                  "scale": 0.01, "unit": "kPa", "digits": 2},
+    "acc_range_g": {"address": 12, "size": 2},
+    "acc_z":     {"address": 26, "size": 2, "signed": true, "unit": "g",
+                  "scale_by": {"register": "acc_range_g", "divisor": 32768}},
+    "error":     {"address": 30, "size": 1, "bits": {"0": "imu", "3": "adc"}}
+  },
+  "info": ["id", "mode", "pressure", "acc_z", "error"],
+  "summary": ["mode", "pressure"]
+}
+```
+
+| key | meaning |
+|---|---|
+| `name` | what the device is called in messages |
+| `match` | `address` and hex `bytes` found there on this device and no other |
+| `registers` | name to `address`, `size` (1 or 2), `writable`, `signed` (two's complement), and optionally how to show it: `values` (number to label), `bits` (bit number to label), `scale` or `scale_by` (value × another register ÷ `divisor`), `unit`, `digits` |
+| `settle_time` | seconds the device may stay silent after an id or speed change (default 1) |
+| `baudrate_table` | `"sts"` (default) or an object of `baud_rate` value to bits per second |
+| `eeprom_lock` | whether EEPROM writes need the servo-style `lock` register (default false) |
+| `info`, `summary` | registers `feetech info` and the `scan` line show |
+| `description` | free text |
+
+A file with a misspelt key, an unknown register in a list, or bytes that are
+not hex is rejected with the file and key named. A broken file is never
+skipped: that would identify the device as a servo and write servo registers
+into it.
+
+```console
+$ feetech --device-file my_board.json --max-id 20 scan
+Found 2 device(s) on /dev/ttyUSB0 at 1.00Mbps:
+  id   1  model   777  position  2048 (+0.0 deg)  12.1V  35C
+  id  10  Example sensor board (model 0x1234, fw 2)  mode 0 (off)  pressure -4210 (-42.10 kPa)
+$ feetech --device-file my_board.json info 10
+$ feetech --device-file my_board.json registers --device my_board
+$ feetech --device-file my_board.json --simulate scan    # try a file without hardware
+```
+
+`set-id` and `set-baud` write the device's own `id` and `baud_rate` registers
+directly: no torque, no EEPROM lock, then poll for up to `settle_time` while it
+commits them. Servo-only commands (`move`, `torque`, `mode`, `set-zero`,
+`selftest`, `factory-reset`) refuse such a device, and the status screen leaves
+it out.

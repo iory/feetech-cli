@@ -132,6 +132,11 @@ class SimulatedServo:
         """int: The servo's ``response_status_level``."""
         return self.memory[CONTROL_TABLE["response_status_level"].address]
 
+    @property
+    def answers_writes(self):
+        """bool: Whether a WRITE gets a status packet back."""
+        return self.response_level != 0
+
     def apply_write(self, address, data):
         """Apply a write instruction to the servo memory.
 
@@ -144,6 +149,12 @@ class SimulatedServo:
             First register address.
         data : sequence of int
             Bytes to store.
+
+        Returns
+        -------
+        int
+            Error bits for the status packet; always 0, a servo does not
+            report a dropped write.
         """
         for offset, byte in enumerate(data):
             target = address + offset
@@ -159,6 +170,7 @@ class SimulatedServo:
             # the servo, whatever torque_enable said beforehand.
             self._store("torque_enable", 1)
         self._settle()
+        return 0
 
     @property
     def homing_offset(self):
@@ -352,15 +364,110 @@ class SimulatedBus:
             payload = bytes(servo.memory[address:address + size])
             return _status(servo.servo_id, servo.error, payload)
         if instruction == INST_WRITE:
-            servo.apply_write(params[0], params[1:])
-            if servo.response_level == 0:
+            refused = servo.apply_write(params[0], params[1:])
+            if not servo.answers_writes:
                 return None
-            return _status(servo.servo_id, servo.error, b"")
+            return _status(servo.servo_id, servo.error | refused, b"")
         if instruction == INST_FACTORY_RESET:
             answer = _status(servo.servo_id, servo.error, b"")
             servo.factory_reset()
             return answer
         return None
+
+
+class SimulatedBoard:
+    """A non-servo device described by a device file.
+
+    It carries the device file's identity bytes, keeps its id and bus speed in
+    the file's ``id`` and ``baud_rate`` registers, and accepts writes only to
+    registers the file marks writable -- a write touching anything else is
+    refused whole with :attr:`REFUSED`, which is how a device enforcing its own
+    write protection behaves.
+
+    Parameters
+    ----------
+    profile : DeviceProfile
+        The device file's profile.
+    board_id : int, optional
+        Initial id.
+    baud_index : int, optional
+        Initial ``baud_rate`` value.
+    """
+
+    SIZE = 256
+    REFUSED = 0x08
+
+    def __init__(self, profile, board_id=10, baud_index=0):
+        self.profile = profile
+        self.memory = bytearray(self.SIZE)
+        address, identity = profile.match
+        self.memory[address:address + len(identity)] = identity
+        self._id_address = profile.control_table["id"].address
+        self._baud_address = profile.control_table["baud_rate"].address
+        self.memory[self._id_address] = board_id
+        self.memory[self._baud_address] = baud_index
+        self.writable = frozenset(
+            reg.address + offset
+            for reg in profile.control_table.values()
+            if reg.writable
+            for offset in range(reg.size)
+        )
+        self.error = 0
+
+    @property
+    def servo_id(self):
+        """int: The board's current id."""
+        return self.memory[self._id_address]
+
+    @property
+    def baudrate(self):
+        """int: The bus speed the board currently listens at."""
+        return self.profile.baudrate_table[self.memory[self._baud_address]]
+
+    @property
+    def answers_writes(self):
+        """bool: Whether a WRITE gets a status packet back."""
+        return True
+
+    def set_register(self, name, value):
+        """Store a raw value, as the device's own firmware would.
+
+        Parameters
+        ----------
+        name : str
+            Register name in the device file.
+        value : int
+            Value, negative allowed for signed registers.
+        """
+        reg = self.profile.control_table[name]
+        self.memory[reg.address:reg.address + reg.size] = value.to_bytes(
+            reg.size, "little", signed=reg.twos_complement
+        )
+
+    def apply_write(self, address, data):
+        """Apply a write, or refuse all of it.
+
+        Parameters
+        ----------
+        address : int
+            First address.
+        data : sequence of int
+            Bytes to store.
+
+        Returns
+        -------
+        int
+            0 when applied, :attr:`REFUSED` when any byte is read-only.
+        """
+        targets = range(address, address + len(data))
+        if not data or any(target not in self.writable for target in targets):
+            return self.REFUSED
+        for target, byte in zip(targets, data):
+            self.memory[target] = byte
+        return 0
+
+    def factory_reset(self):
+        """Keep id and speed; a device file says nothing about defaults."""
 
 
 def _status(servo_id, error, params):
