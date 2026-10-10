@@ -78,6 +78,10 @@ def list_candidate_ports():
     return sorted(ports, key=rank)
 
 
+#: Widest single READ :meth:`FeetechServoController.read_registers` issues.
+#: Well inside what STS servos and small boards answer in one status packet.
+MAX_READ_SPAN = 64
+
 class FeetechServoController:
     """Talk to FEETECH STS/SMS/SCS servos on a serial bus.
 
@@ -433,6 +437,10 @@ class FeetechServoController:
         self._require_open()
         register = _lookup(name, self.device_profile(servo_id))
         data = self.packet_handler.read(servo_id, register.address, register.size)
+        return self._decode_register(register, data)
+
+    def _decode_register(self, register, data):
+        """Turn the bytes of one register into its value, sign decoded."""
         value = self.packet_handler.decode(register.size, data)
         if register.sign_bit is not None:
             return from_sign_magnitude(value, register.sign_bit)
@@ -441,6 +449,58 @@ class FeetechServoController:
             if value & (1 << (bits - 1)):
                 value -= 1 << bits
         return value
+
+    def read_registers(self, servo_id, names):
+        """Read several registers in as few READ instructions as possible.
+
+        Registers are grouped into runs no wider than :data:`MAX_READ_SPAN`
+        bytes and each run is one READ, so a refresh of an IMU's six axes is a
+        single round trip instead of six. Unlike :meth:`dump`, a failed read
+        raises: a live view must not show a stale value as if it were current.
+
+        Parameters
+        ----------
+        servo_id : int
+            Device id.
+        names : sequence of str
+            Register names.
+
+        Returns
+        -------
+        dict
+            Register name to value.
+
+        Raises
+        ------
+        FeetechError
+            If a name is unknown or a READ fails.
+        """
+        self._require_open()
+        profile = self.device_profile(servo_id)
+        registers = sorted(
+            ((name, _lookup(name, profile)) for name in dict.fromkeys(names)),
+            key=lambda item: item[1].address,
+        )
+        values = {}
+        index = 0
+        while index < len(registers):
+            start = registers[index][1].address
+            end = index
+            while (
+                end + 1 < len(registers)
+                and registers[end + 1][1].address + registers[end + 1][1].size - start
+                <= MAX_READ_SPAN
+            ):
+                end += 1
+            last = registers[end][1]
+            data = self.packet_handler.read(servo_id, start, last.address + last.size - start)
+            for name, register in registers[index:end + 1]:
+                offset = register.address - start
+                values[name] = self._decode_register(
+                    register, data[offset:offset + register.size]
+                )
+            index = end + 1
+        return values
 
     def write_register(self, servo_id, name, value):
         """Write a named register.

@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import time
 
 import colorama
 from colorama import Fore
@@ -119,6 +120,23 @@ def build_parser():
         ),
     )
     set_baud.add_argument("-y", "--yes", action="store_true", help="do not ask for confirmation")
+
+    watch = sub.add_parser(
+        "watch", help="show registers of one device live (IMU, pressure, position, ...)"
+    )
+    watch.add_argument("id", type=int, help="device id")
+    watch.add_argument(
+        "registers", nargs="*",
+        help="register names (default: what 'feetech info' shows for that device)",
+    )
+    watch.add_argument(
+        "-i", "--interval", type=float, default=0.1,
+        help="seconds between refreshes (default: %(default)s)",
+    )
+    watch.add_argument(
+        "-n", "--count", type=int, default=None,
+        help="stop after this many refreshes (default: until Ctrl-C)",
+    )
 
     read = sub.add_parser("read", help="read one register")
     read.add_argument("id", type=int, help="servo id")
@@ -725,6 +743,72 @@ def command_write(args, controller):
     return 0
 
 
+def command_watch(args, controller):
+    """Show registers of one device, refreshed in place.
+
+    Each refresh reads every shown register (plus any a ``scale_by`` rule
+    needs) in as few READs as possible. On a terminal the block is redrawn in
+    place; otherwise one line per refresh is printed, which suits logging.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed arguments.
+    controller : FeetechServoController
+        An open controller.
+
+    Returns
+    -------
+    int
+        Process exit status.
+    """
+    profile = controller.device_profile(args.id)
+    names = list(args.registers) or list(profile.info_registers or INFO_REGISTERS)
+    unknown = [name for name in names if name not in profile.control_table]
+    if unknown:
+        print(
+            f"{Fore.RED}Unknown register(s) {', '.join(unknown)} for a {profile.name}; "
+            f"see 'feetech registers --device {profile.key}'.{Style.RESET_ALL}"
+        )
+        return 1
+    to_read = _with_references(profile, names)
+    interactive = sys.stdout.isatty()
+    width = max(len(name) for name in names)
+    drawn = 0
+    refreshes = 0
+    started = time.monotonic()
+    try:
+        while args.count is None or refreshes < args.count:
+            tick = time.monotonic()
+            values = controller.read_registers(args.id, to_read)
+            refreshes += 1
+            rate = refreshes / max(time.monotonic() - started, 1e-6)
+            if interactive:
+                lines = [
+                    f"{profile.name} {args.id}  {rate:5.1f} Hz  (Ctrl-C to stop)"
+                ] + [
+                    "  {:<{width}}  {}".format(
+                        name, _annotate(name, values[name], values, profile), width=width
+                    )
+                    for name in names
+                ]
+                if drawn:
+                    sys.stdout.write(f"\x1b[{drawn}F")
+                sys.stdout.write("".join(f"\x1b[2K{line}\n" for line in lines))
+                sys.stdout.flush()
+                drawn = len(lines)
+            else:
+                print("  ".join(
+                    f"{name}={_annotate(name, values[name], values, profile)}" for name in names
+                ))
+            remaining = args.interval - (time.monotonic() - tick)
+            if remaining > 0 and (args.count is None or refreshes < args.count):
+                time.sleep(remaining)
+    except KeyboardInterrupt:
+        print()
+    return 0
+
+
 def command_registers(args):
     """List the control table.
 
@@ -1037,6 +1121,7 @@ BUS_COMMANDS = {
     "set-baud": command_set_baud,
     "read": command_read,
     "write": command_write,
+    "watch": command_watch,
     "move": command_move,
     "torque": command_torque,
     "mode": command_mode,

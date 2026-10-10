@@ -508,7 +508,13 @@ Found 2 device(s) on /dev/ttyUSB0 at 1.00Mbps:
 $ feetech --device-file my_board.json info 10
 $ feetech --device-file my_board.json registers --device my_board
 $ feetech --device-file my_board.json --simulate scan    # try a file without hardware
+$ feetech --device-file my_board.json watch 10 acc_z pressure   # live, Ctrl-C to stop
 ```
+
+`watch ID [REGISTER ...]` redraws the named registers (default: what `info`
+shows) every `--interval` seconds, reading neighbouring registers in one READ
+so six IMU axes cost one round trip. Off a terminal it prints one line per
+refresh, for logging; `--count` stops after that many. It works for servos too.
 
 `set-id` and `set-baud` write the device's own `id` and `baud_rate` registers
 directly: no torque, no EEPROM lock, then poll for up to `settle_time` while it

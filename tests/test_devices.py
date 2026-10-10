@@ -273,3 +273,26 @@ def test_a_broken_device_file_stops_the_cli(tmp_path, capsys):
     path = _broken(tmp_path, {"name": "x"})
     assert cli.main(["--device-file", str(path), "registers"]) == 2
     assert "needs a 'match'" in capsys.readouterr().out
+
+
+def test_read_registers_reads_a_run_in_one_instruction(profile):
+    from feetech_cli.protocol import INST_READ
+
+    controller, bus = make_controller([make_board(profile)], [profile])
+    controller.device_profile(BOARD_ID)
+    before = len(bus.tx_log)
+    values = controller.read_registers(BOARD_ID, ["acc_z", "pressure", "acc_range_g", "mode"])
+    reads = [p for p in bus.tx_log[before:] if p[4] == INST_READ]
+    assert len(reads) == 1
+    assert values == {"acc_z": 2048, "pressure": -4210, "acc_range_g": 16, "mode": 0}
+
+
+def test_watch_prints_one_line_per_refresh_off_a_terminal(mixed_bus, capsys):
+    assert run(["watch", str(BOARD_ID), "acc_z", "pressure", "-n", "3", "-i", "0"]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines[-3:] == ["acc_z=2048 (+1.000 g)  pressure=-4210 (-42.10 kPa)"] * 3
+
+
+def test_watch_rejects_a_register_the_device_lacks(mixed_bus, capsys):
+    assert run(["watch", str(BOARD_ID), "present_position", "-n", "1"]) == 1
+    assert "Unknown register(s) present_position" in capsys.readouterr().out
