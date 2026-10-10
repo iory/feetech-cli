@@ -86,12 +86,59 @@ def written_addresses(bus, device_id):
     ]
 
 
+def reader(memory):
+    """A ``read(address, length)`` over a byte string, logging each call."""
+    calls = []
+
+    def read(address, length):
+        """Return a slice of ``memory``."""
+        calls.append((address, length))
+        return memory[address:address + length]
+
+    return read, calls
+
+
 def test_identify_needs_the_match_bytes(profile):
-    assert identify(bytes.fromhex("3412455842"), [profile]) is profile
+    assert identify(reader(bytes.fromhex("3412455842"))[0], [profile]) is profile
     # A servo's first bytes: firmware 3.10, model 777.
-    assert identify(bytes([3, 10, 0, 0x09, 0x03]), [profile]) is SERVO
-    assert identify(bytes.fromhex("34124558ff"), [profile]) is SERVO
-    assert identify(b"", [profile]) is SERVO
+    assert identify(reader(bytes([3, 10, 0, 0x09, 0x03]))[0], [profile]) is SERVO
+    assert identify(reader(bytes.fromhex("34124558ff"))[0], [profile]) is SERVO
+    assert identify(reader(b"")[0], [profile]) is SERVO
+
+
+def _variant(revision, name):
+    """The example board, told apart from its sibling by a revision byte."""
+    data = json.loads(EXAMPLE.read_text())
+    data["name"] = name
+    data["match"] = [data["match"], {"address": 40, "bytes": f"{revision:02x}"}]
+    return profile_from_dict(data)
+
+
+def test_a_list_match_tells_boards_with_one_model_number_apart():
+    rev2, rev3 = _variant(2, "Board rev 2"), _variant(3, "Board rev 3")
+    memory = bytearray(64)
+    memory[0:5] = bytes.fromhex("3412455842")
+    memory[40] = 3
+    read, calls = reader(bytes(memory))
+    assert identify(read, [rev2, rev3]) is rev3
+    # The shared model bytes are read once, not once per device file.
+    assert calls == [(0, 5), (40, 1)]
+
+
+def test_a_servo_costs_one_read_however_long_the_match_list():
+    servo_memory = bytes([3, 10, 0, 0x09, 0x03]) + bytes(59)
+    read, calls = reader(servo_memory)
+    assert identify(read, [_variant(2, "Board rev 2"), _variant(3, "Board rev 3")]) is SERVO
+    assert calls == [(0, 5)]
+
+
+def test_the_simulated_board_answers_to_every_match_entry():
+    rev3 = _variant(3, "Board rev 3")
+    controller, _ = make_controller(
+        [FakeServo(1), FakeBoard(rev3, board_id=BOARD_ID)], [_variant(2, "Board rev 2"), rev3]
+    )
+    assert controller.device_profile(BOARD_ID) is rev3
+    assert controller.is_servo(1)
 
 
 def test_without_device_files_nothing_is_probed():
@@ -171,6 +218,8 @@ def _broken(tmp_path, data):
     "mutate, message",
     [
         (lambda d: d.pop("match"), "needs a 'match'"),
+        (lambda d: d.update(match=[]), "needs a 'match'"),
+        (lambda d: d["match"].update(adress=1), r"'match' has unknown key\(s\) \['adress'\]"),
         (lambda d: d.update(nmae="x"), r"unknown key\(s\) \['nmae'\]"),
         (lambda d: d["registers"]["mode"].update(adress=3), "register 'mode' has unknown key"),
         (lambda d: d["registers"]["mode"].update(size=4), "'size' must be 1 or 2"),

@@ -7,7 +7,7 @@ import serial.tools.list_ports
 
 from feetech_cli.devices import SERVO
 from feetech_cli.devices import identify
-from feetech_cli.devices import identity_span
+from feetech_cli.devices import needs_identification
 from feetech_cli.protocol import BROADCAST_ID
 from feetech_cli.protocol import FeetechError
 from feetech_cli.protocol import FeetechStatusError
@@ -389,13 +389,14 @@ class FeetechServoController:
         self._require_open()
         profile = self.profiles.get(servo_id)
         if profile is None:
-            span = identity_span(self.device_profiles)
-            if span == 0:
+            if not needs_identification(self.device_profiles):
                 # No device files: every id is a servo, as it always was.
                 profile = SERVO
             else:
-                identity = self.packet_handler.read(servo_id, 0, span)
-                profile = identify(identity, self.device_profiles)
+                profile = identify(
+                    lambda address, length: self.packet_handler.read(servo_id, address, length),
+                    self.device_profiles,
+                )
             self.profiles[servo_id] = profile
         return profile
 

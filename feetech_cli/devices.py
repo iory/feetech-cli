@@ -40,8 +40,10 @@ exactly as before. A device file::
     }
 
 ``match`` is compared against the bytes read from ``address``; the first
-device file whose bytes match wins, anything else is a servo. See
-:func:`profile_from_dict` for every key.
+device file whose bytes match wins, anything else is a servo. Two boards that
+share a model number can still be told apart: ``match`` may be a list of such
+objects, and every one of them has to match. See :func:`profile_from_dict` for
+every key.
 """
 
 import json
@@ -73,8 +75,9 @@ from feetech_cli.registers import Register
 #:     Registers shown by ``feetech info`` without ``--all``.
 #: settle_time : float
 #:     Seconds the device may stay silent after its id or bus speed changes.
-#: match : tuple of (int, bytes) or None
-#:     Address and bytes that identify the device; None for the servo.
+#: match : tuple of (int, bytes) pairs, or None
+#:     Address and bytes that identify the device, all of which must be found;
+#:     None for the servo.
 #: formats : dict
 #:     Register name to a display rule (see :func:`format_value`).
 #: summary_registers : tuple of str
@@ -211,6 +214,43 @@ def _register_from_dict(name, spec, source):
     return register, rule
 
 
+def _match_from_dict(match, source):
+    """Parse ``match``: one ``{address, bytes}`` object or a list of them.
+
+    Parameters
+    ----------
+    match : object
+        The ``match`` value of a device file.
+    source : str
+        Where it came from, for error messages.
+
+    Returns
+    -------
+    tuple of (int, bytes) pairs
+        Every address and the bytes expected there, in checking order.
+    """
+    entries = match if isinstance(match, list) else [match]
+    _require(
+        bool(entries) and all(isinstance(e, dict) for e in entries), source,
+        "needs a 'match' object (or a list of them) with 'address' and 'bytes'",
+    )
+    parsed = []
+    for entry in entries:
+        unknown = set(entry) - {"address", "bytes"}
+        _require(not unknown, source, f"'match' has unknown key(s) {sorted(unknown)}")
+        try:
+            expected = bytes.fromhex(str(entry.get("bytes", "")))
+        except ValueError:
+            raise DeviceFileError(f"{source}: 'match.bytes' must be a hex string") from None
+        address = entry.get("address", 0)
+        _require(
+            isinstance(address, int) and address >= 0 and expected, source,
+            "'match' needs a non-negative 'address' and at least one byte",
+        )
+        parsed.append((address, expected))
+    return tuple(parsed)
+
+
 def profile_from_dict(data, source="<device file>", key=None):
     """Build a :class:`DeviceProfile` from the contents of a device file.
 
@@ -220,8 +260,10 @@ def profile_from_dict(data, source="<device file>", key=None):
         The parsed JSON. Keys:
 
         - ``name`` (str, required): what the device is called in messages.
-        - ``match`` (object, required): ``address`` (int) and ``bytes`` (hex
-          string) found there on this kind of device and no other.
+        - ``match`` (object or list of objects, required): ``address`` (int)
+          and ``bytes`` (hex string) found there on this kind of device and no
+          other. With a list, every entry has to match; they are checked in
+          order, so put the one that rules out servos first.
         - ``registers`` (object, required): register name to ``address``,
           ``size`` (1 or 2, default 1), ``writable`` (default false),
           ``signed`` (two's complement, default false), ``area`` (default
@@ -259,19 +301,7 @@ def profile_from_dict(data, source="<device file>", key=None):
     name = data.get("name")
     _require(isinstance(name, str) and name.strip(), source, "needs a 'name'")
 
-    match = data.get("match")
-    _require(
-        isinstance(match, dict), source, "needs a 'match' object with 'address' and 'bytes'"
-    )
-    try:
-        match_bytes = bytes.fromhex(str(match.get("bytes", "")))
-    except ValueError:
-        raise DeviceFileError(f"{source}: 'match.bytes' must be a hex string") from None
-    match_address = match.get("address", 0)
-    _require(
-        isinstance(match_address, int) and match_address >= 0 and match_bytes, source,
-        "'match' needs a non-negative 'address' and at least one byte",
-    )
+    match = _match_from_dict(data.get("match"), source)
 
     registers = data.get("registers")
     _require(
@@ -328,7 +358,7 @@ def profile_from_dict(data, source="<device file>", key=None):
         has_eeprom_lock=bool(data.get("eeprom_lock", False)),
         info_registers=lists["info"] or None,
         settle_time=float(settle_time),
-        match=(match_address, match_bytes),
+        match=match,
         formats=formats,
         summary_registers=lists["summary"],
         source=source,
@@ -436,8 +466,8 @@ def load_profiles(paths=(), environ=None, search_default=True):
     return profiles
 
 
-def identity_span(profiles):
-    """Bytes to read from address 0 to test every profile's ``match``.
+def needs_identification(profiles):
+    """Return whether any loaded profile has to be told apart from servos.
 
     Parameters
     ----------
@@ -446,34 +476,49 @@ def identity_span(profiles):
 
     Returns
     -------
-    int
-        0 when there is nothing to identify.
+    bool
+        False when no device file is loaded, so nothing extra is read.
     """
-    ends = [p.match[0] + len(p.match[1]) for p in profiles if p.match is not None]
-    return max(ends, default=0)
+    return any(p.match is not None for p in profiles)
 
 
-def identify(identity, profiles):
-    """Tell which kind of device produced an identity read.
+def identify(read, profiles):
+    """Tell which kind of device answers at an id.
+
+    Each profile's ``match`` entries are checked in order and checking stops at
+    the first mismatch, so a servo costs one READ however many entries a
+    device file lists. Each distinct span is read at most once.
 
     Parameters
     ----------
-    identity : bytes
-        Bytes read from address 0, :func:`identity_span` of them.
+    read : callable
+        ``read(address, length)`` returning the bytes the device holds there.
+        A failed read raises; it is not taken to mean "not this device".
     profiles : sequence of DeviceProfile
         Loaded device profiles, in priority order.
 
     Returns
     -------
     DeviceProfile
-        The first profile whose ``match`` bytes are found, else :data:`SERVO`.
+        The first profile whose ``match`` entries are all found, else
+        :data:`SERVO`.
     """
-    identity = bytes(identity)
+    seen = {}
+
+    def read_once(address, length):
+        """Read a span the first time it is asked for, then reuse it."""
+        span = (address, length)
+        if span not in seen:
+            seen[span] = bytes(read(address, length))
+        return seen[span]
+
     for profile in profiles:
         if profile.match is None:
             continue
-        address, expected = profile.match
-        if identity[address:address + len(expected)] == expected:
+        if all(
+            read_once(address, len(expected)) == expected
+            for address, expected in profile.match
+        ):
             return profile
     return SERVO
 

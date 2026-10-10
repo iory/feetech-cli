@@ -461,6 +461,13 @@ With a device file loaded, every id is identified once by reading the bytes its
 `match` names; a match gets the file's control table, everything else is a
 servo as before. With none loaded nothing extra is sent on the bus.
 
+Two boards that share a model number -- the same firmware on two board
+revisions, say -- are told apart by listing more than one place to look:
+
+```json
+"match": [{"address": 0, "bytes": "3412455842"}, {"address": 40, "bytes": "03"}]
+```
+
 ```json
 {
   "name": "Example sensor board",
@@ -487,7 +494,7 @@ servo as before. With none loaded nothing extra is sent on the bus.
 | key | meaning |
 |---|---|
 | `name` | what the device is called in messages |
-| `match` | `address` and hex `bytes` found there on this device and no other |
+| `match` | `address` and hex `bytes` found there on this device and no other; or a list of such objects, all of which must match (checked in order, so a servo is ruled out by the first READ) |
 | `registers` | name to `address`, `size` (1 or 2), `writable`, `signed` (two's complement), and optionally how to show it: `values` (number to label), `bits` (bit number to label), `scale` or `scale_by` (value × another register ÷ `divisor`), `unit`, `digits` |
 | `settle_time` | seconds the device may stay silent after an id or speed change (default 1) |
 | `baudrate_table` | `"sts"` (default) or an object of `baud_rate` value to bits per second |

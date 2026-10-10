@@ -400,8 +400,8 @@ class SimulatedBoard:
     def __init__(self, profile, board_id=10, baud_index=0):
         self.profile = profile
         self.memory = bytearray(self.SIZE)
-        address, identity = profile.match
-        self.memory[address:address + len(identity)] = identity
+        for address, identity in profile.match:
+            self.memory[address:address + len(identity)] = identity
         self._id_address = profile.control_table["id"].address
         self._baud_address = profile.control_table["baud_rate"].address
         self.memory[self._id_address] = board_id
