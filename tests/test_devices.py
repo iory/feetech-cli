@@ -18,9 +18,11 @@ from feetech_cli.devices import identify
 from feetech_cli.devices import load_profile
 from feetech_cli.devices import load_profiles
 from feetech_cli.devices import profile_from_dict
+from feetech_cli.protocol import INST_PING
 from feetech_cli.protocol import INST_WRITE
 from feetech_cli.protocol import FeetechError
 from feetech_cli.protocol import PacketHandler
+from feetech_cli.protocol import checksum
 
 BOARD_ID = 10
 EXAMPLE = Path(__file__).parent / "data" / "example_board.json"
@@ -194,6 +196,48 @@ def test_a_write_with_a_settle_time_waits_for_the_device_before_reading_back(mon
     waited.clear()
     controller.write_register(BOARD_ID, "id", BOARD_ID)
     assert waited == []
+
+
+def test_late_replies_to_buffered_pings_are_not_read_back_as_the_register(monkeypatch):
+    # A board erasing flash buffers the pings it cannot answer and, once
+    # back, answers them all; the extra replies are still on the wire when
+    # the read-back goes out.
+    profile = _with_settle(1.0)
+    controller, bus = make_controller([make_board(profile)], [profile])
+    stale_reply = bytes([0xFF, 0xFF, BOARD_ID, 2, 0, checksum([BOARD_ID, 2, 0])])
+    late = bytearray()
+    answered = []
+    real_write = bus.write
+    real_read = bus.read
+    real_reset = bus.reset_input_buffer
+
+    def arrive():
+        """The late replies land in the receive buffer."""
+        bus.rx.extend(late)
+        late.clear()
+
+    def write(packet):
+        """After the first ping that follows the write, queue late replies."""
+        real_write(packet)
+        if packet[4] == INST_PING and written_addresses(bus, BOARD_ID) and not answered:
+            answered.append(packet)
+            late.extend(stale_reply * 14)
+
+    def read(count=1):
+        """Late bytes show up once the buffer has been read dry."""
+        if not bus.rx:
+            arrive()
+        return real_read(count)
+
+    def reset_input_buffer():
+        """A flush drops what is there; the late replies are still coming."""
+        real_reset()
+        arrive()
+
+    monkeypatch.setattr(bus, "write", write)
+    monkeypatch.setattr(bus, "read", read)
+    monkeypatch.setattr(bus, "reset_input_buffer", reset_input_buffer)
+    assert controller.write_register(BOARD_ID, "mode", 1) == 1
 
 
 def test_a_device_that_stays_silent_past_its_settle_time_is_an_error(monkeypatch):

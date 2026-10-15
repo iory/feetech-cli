@@ -82,6 +82,14 @@ def list_candidate_ports():
 #: Well inside what STS servos and small boards answer in one status packet.
 MAX_READ_SPAN = 64
 
+#: Silence that ends the drain after a settling device first answers again.
+#: Comfortably longer than a USB serial bridge's latency timer.
+SETTLE_QUIET_TIME = 0.02
+
+#: Longest the drain may run. A few dozen buffered replies take
+#: milliseconds at 1 Mbit/s and about a tenth of a second at 9600 bit/s.
+SETTLE_DRAIN_LIMIT = 0.5
+
 class FeetechServoController:
     """Talk to FEETECH STS/SMS/SCS servos on a serial bus.
 
@@ -726,6 +734,10 @@ class FeetechServoController:
     def _wait_for(self, servo_id, settle_time):
         """Ping until a device answers or ``settle_time`` runs out.
 
+        A device that buffered the pings sent while it was deaf may answer
+        all of them at once when it comes back; those late replies are
+        drained so the next request does not take one for its own answer.
+
         Returns
         -------
         bool
@@ -734,6 +746,7 @@ class FeetechServoController:
         deadline = time.monotonic() + settle_time
         while True:
             if self.ping(servo_id):
+                self.packet_handler.drain(SETTLE_QUIET_TIME, SETTLE_DRAIN_LIMIT)
                 return True
             if time.monotonic() >= deadline:
                 return False
