@@ -169,6 +169,41 @@ def test_board_write_needs_no_eeprom_lock(profile):
     assert written_addresses(bus, BOARD_ID) == [20]
 
 
+def _with_settle(seconds):
+    """The example board, quiet for ``seconds`` after a write to 'mode'."""
+    data = json.loads(EXAMPLE.read_text())
+    data["registers"]["mode"]["settle_time"] = seconds
+    return profile_from_dict(data)
+
+
+def test_a_write_with_a_settle_time_waits_for_the_device_before_reading_back(monkeypatch):
+    profile = _with_settle(1.5)
+    controller, _ = make_controller([make_board(profile)], [profile])
+    waited = []
+    real_wait = controller._wait_for
+
+    def wait_for(servo_id, settle_time):
+        """Record the wait, then ping as usual."""
+        waited.append((servo_id, settle_time))
+        return real_wait(servo_id, settle_time)
+
+    monkeypatch.setattr(controller, "_wait_for", wait_for)
+    assert controller.write_register(BOARD_ID, "mode", 1) == 1
+    assert waited == [(BOARD_ID, 1.5)]
+    # Registers without one are read back straight away.
+    waited.clear()
+    controller.write_register(BOARD_ID, "id", BOARD_ID)
+    assert waited == []
+
+
+def test_a_device_that_stays_silent_past_its_settle_time_is_an_error(monkeypatch):
+    profile = _with_settle(0.2)
+    controller, _ = make_controller([make_board(profile)], [profile])
+    monkeypatch.setattr(controller, "_wait_for", lambda servo_id, settle_time: False)
+    with pytest.raises(FeetechError, match="did not answer again within 0.2 s"):
+        controller.write_register(BOARD_ID, "mode", 1)
+
+
 def test_a_refused_board_write_is_reported_as_a_refusal(profile):
     board = make_board(profile)
     board.writable = frozenset()
@@ -223,6 +258,9 @@ def _broken(tmp_path, data):
         (lambda d: d.update(nmae="x"), r"unknown key\(s\) \['nmae'\]"),
         (lambda d: d["registers"]["mode"].update(adress=3), "register 'mode' has unknown key"),
         (lambda d: d["registers"]["mode"].update(size=4), "'size' must be 1 or 2"),
+        (lambda d: d["registers"]["model_number"].update(settle_time=1),
+         "'settle_time' must be a non-negative number of seconds on a writable register"),
+        (lambda d: d["registers"]["mode"].update(settle_time=-1), "'settle_time' must be"),
         (lambda d: d.update(info=["nope"]), r"'info' names unknown register\(s\) \['nope'\]"),
         (lambda d: d["registers"]["acc_z"]["scale_by"].update(register="nope"),
          "scales by unknown register 'nope'"),

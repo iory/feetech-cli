@@ -546,6 +546,12 @@ class FeetechServoController:
         finally:
             if locked:
                 self.lock_eeprom(servo_id)
+        settle = profile.write_settle.get(name)
+        if settle is not None and not self._wait_for(servo_id, settle):
+            raise FeetechError(
+                f"{profile.name} {servo_id} took the write to '{name}' but did not answer "
+                f"again within {settle:.1f} s"
+            )
         return self.read_register(servo_id, name)
 
     def _write_raw(self, servo_id, register, value, expect_status=None):

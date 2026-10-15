@@ -495,7 +495,7 @@ revisions, say -- are told apart by listing more than one place to look:
 |---|---|
 | `name` | what the device is called in messages |
 | `match` | `address` and hex `bytes` found there on this device and no other; or a list of such objects, all of which must match (checked in order, so a servo is ruled out by the first READ) |
-| `registers` | name to `address`, `size` (1 or 2), `writable`, `signed` (two's complement), and optionally how to show it: `values` (number to label), `bits` (bit number to label), `scale` or `scale_by` (value × another register ÷ `divisor`), `unit`, `digits` |
+| `registers` | name to `address`, `size` (1 or 2), `writable`, `signed` (two's complement), and optionally how to show it: `values` (number to label), `bits` (bit number to label), `scale` or `scale_by` (value × another register ÷ `divisor`), `unit`, `digits`; a writable register may add `settle_time`, the seconds the device stays silent after a write to it (while it saves the value to flash, say), and the write waits for it to answer before reading back |
 | `settle_time` | seconds the device may stay silent after an id or speed change (default 1) |
 | `baudrate_table` | `"sts"` (default) or an object of `baud_rate` value to bits per second |
 | `eeprom_lock` | whether EEPROM writes need the servo-style `lock` register (default false) |
