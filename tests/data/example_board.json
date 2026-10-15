@@ -1,0 +1,22 @@
+{
+  "name": "Example sensor board",
+  "description": "A made-up device used by the test suite.",
+  "match": {"address": 0, "bytes": "3412455842"},
+  "settle_time": 0.2,
+  "registers": {
+    "model_number": {"address": 0, "size": 2},
+    "firmware_version": {"address": 6, "size": 1},
+    "id": {"address": 7, "size": 1, "writable": true},
+    "baud_rate": {"address": 8, "size": 1, "writable": true},
+    "acc_range_g": {"address": 12, "size": 2},
+    "acc_z": {"address": 26, "size": 2, "signed": true, "unit": "g",
+              "scale_by": {"register": "acc_range_g", "divisor": 32768}},
+    "mode": {"address": 20, "size": 1, "writable": true,
+             "values": {"0": "off", "1": "on"}},
+    "pressure": {"address": 24, "size": 2, "signed": true,
+                 "scale": 0.01, "unit": "kPa", "digits": 2},
+    "error": {"address": 30, "size": 1, "bits": {"0": "imu", "3": "adc"}}
+  },
+  "info": ["id", "model_number", "baud_rate", "mode", "pressure", "acc_z", "error"],
+  "summary": ["mode", "pressure"]
+}

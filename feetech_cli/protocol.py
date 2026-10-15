@@ -29,6 +29,9 @@ INST_ACTION = 0x05
 INST_FACTORY_RESET = 0x06
 INST_SYNC_WRITE = 0x83
 
+#: Bytes read per call while draining stale replies off the bus.
+DRAIN_CHUNK = 256
+
 #: Hardware error bits reported in the ``ERROR`` byte of a status packet.
 ERROR_BITS = (
     (0x01, "voltage"),
@@ -293,6 +296,41 @@ class PacketHandler:
         self.port.reset_input_buffer()
         self.port.write(packet)
         self.port.flush()
+
+    def drain(self, quiet_time, limit):
+        """Read and discard bytes until the bus has been silent for a while.
+
+        :meth:`_send` only drops what has already arrived. A device that was
+        deaf for a while (erasing flash, rebooting) can come back and answer
+        every request it buffered meanwhile, back to back; those replies keep
+        arriving after the flush and get read as the answer to the next
+        request.
+
+        Parameters
+        ----------
+        quiet_time : float
+            Seconds without a byte that count as silence.
+        limit : float
+            Give up after this many seconds even if bytes keep coming.
+
+        Returns
+        -------
+        int
+            Number of bytes discarded.
+        """
+        saved_timeout = self.port.timeout
+        self.port.timeout = quiet_time
+        deadline = time.monotonic() + limit
+        discarded = 0
+        try:
+            while time.monotonic() < deadline:
+                data = self.port.read(DRAIN_CHUNK)
+                if not data:
+                    break
+                discarded += len(data)
+        finally:
+            self.port.timeout = saved_timeout
+        return discarded
 
     def _read_exact(self, count):
         """Read exactly ``count`` bytes or raise.

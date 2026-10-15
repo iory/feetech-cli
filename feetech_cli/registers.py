@@ -29,7 +29,14 @@ from collections import namedtuple
 #:     Whether the register accepts writes.
 #: sign_bit : int or None
 #:     Index of the sign bit for sign-magnitude encoded registers.
-Register = namedtuple("Register", ["address", "size", "area", "writable", "sign_bit"])
+#: twos_complement : bool
+#:     Whether the value is a two's complement signed integer. FEETECH servos
+#:     use sign-magnitude, but devices that share the bus may not.
+Register = namedtuple(
+    "Register",
+    ["address", "size", "area", "writable", "sign_bit", "twos_complement"],
+    defaults=(False,),
+)
 
 
 def _eeprom(address, size, writable=True, sign_bit=None):
