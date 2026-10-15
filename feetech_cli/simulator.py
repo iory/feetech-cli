@@ -13,6 +13,7 @@ automatically; ``--simulate`` has to be asked for explicitly.
 from feetech_cli.protocol import INST_FACTORY_RESET
 from feetech_cli.protocol import INST_PING
 from feetech_cli.protocol import INST_READ
+from feetech_cli.protocol import INST_SYNC_READ
 from feetech_cli.protocol import INST_SYNC_WRITE
 from feetech_cli.protocol import INST_WRITE
 from feetech_cli.protocol import checksum
@@ -310,6 +311,8 @@ class SimulatedBus:
         if instruction == INST_SYNC_WRITE:
             self._sync_write(params)
             return None
+        if instruction == INST_SYNC_READ:
+            return self._sync_read(params)
 
         for servo in self.servos:
             if servo.baudrate != self.baudrate:
@@ -319,6 +322,17 @@ class SimulatedBus:
                 continue
             return self._handle(servo, instruction, params)
         return None
+
+    def _sync_read(self, params):
+        """Answer a SYNC_READ: each listed device in turn, absent ones skipped."""
+        address, size, ids = params[0], params[1], params[2:]
+        answers = b""
+        for servo_id in ids:
+            for servo in self.servos:
+                if servo.servo_id == servo_id and servo.baudrate == self.baudrate:
+                    answers += self._handle(servo, INST_READ, bytes([address, size]))
+                    break
+        return answers or None
 
     def _sync_write(self, params):
         """Apply a broadcast sync write to every servo it addresses.

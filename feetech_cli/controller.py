@@ -427,6 +427,19 @@ class FeetechServoController:
 
     # -- register access ---------------------------------------------------
 
+    def sync_read(self, servo_ids, address, size):
+        """Read the same address range of several devices in one SYNC_READ.
+
+        See :meth:`~feetech_cli.protocol.PacketHandler.sync_read`.
+
+        Returns
+        -------
+        dict of int to tuple of (int, bytes)
+            Id to its error byte and the bytes read.
+        """
+        self._require_open()
+        return self.packet_handler.sync_read(servo_ids, address, size)
+
     def read_register(self, servo_id, name):
         """Read a named register.
 

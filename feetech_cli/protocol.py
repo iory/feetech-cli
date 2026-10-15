@@ -27,6 +27,7 @@ INST_WRITE = 0x03
 INST_REG_WRITE = 0x04
 INST_ACTION = 0x05
 INST_FACTORY_RESET = 0x06
+INST_SYNC_READ = 0x82
 INST_SYNC_WRITE = 0x83
 
 #: Bytes read per call while draining stale replies off the bus.
@@ -513,6 +514,67 @@ class PacketHandler:
                 f"expected {size} bytes from address {address}, received {len(answer)}"
             )
         return answer
+
+    def sync_read(self, servo_ids, address, size):
+        """Read the same registers of several devices in one SYNC_READ.
+
+        One broadcast instruction; the devices answer one after another, in
+        the order listed. Saves a round trip per device over :meth:`read` and
+        samples them all within one burst.
+
+        Parameters
+        ----------
+        servo_ids : sequence of int
+            Device ids, each once.
+        address : int
+            First register address.
+        size : int
+            Number of bytes to read from each device.
+
+        Returns
+        -------
+        dict of int to tuple of (int, bytes)
+            Id to its error byte and register contents. A non-zero error byte
+            is returned rather than raised, so the caller still gets the data
+            of a device that reports a fault.
+
+        Raises
+        ------
+        FeetechTimeoutError
+            If a device does not answer; the message names it.
+        FeetechChecksumError
+            If an answer is corrupt, out of order or the wrong size.
+        """
+        servo_ids = [int(i) for i in servo_ids]
+        if not servo_ids or len(set(servo_ids)) != len(servo_ids):
+            raise ValueError(f"need distinct ids, got {servo_ids}")
+        packet = self.build_packet(
+            BROADCAST_ID, INST_SYNC_READ, [address & 0xFF, size & 0xFF] + servo_ids
+        )
+        self._send(packet)
+        answers = {}
+        # Only the first packet back can be the adapter's echo.
+        echo = packet
+        for expected in servo_ids:
+            try:
+                answer_id, error, data = self._read_status_packet(sent=echo)
+            except FeetechTimeoutError as timeout:
+                raise FeetechTimeoutError(
+                    f"SYNC_READ: no answer from id {expected} "
+                    f"(answered: {list(answers) or 'none'}): {timeout}"
+                ) from timeout
+            echo = None
+            if answer_id != expected:
+                raise FeetechChecksumError(
+                    f"SYNC_READ: expected the answer of id {expected}, got id {answer_id}"
+                )
+            if len(data) != size:
+                raise FeetechChecksumError(
+                    f"SYNC_READ: expected {size} bytes from id {expected}, "
+                    f"received {len(data)}"
+                )
+            answers[expected] = (error, data)
+        return answers
 
     def write(self, servo_id, address, data, expect_status=True):
         """Write raw bytes to a register.
