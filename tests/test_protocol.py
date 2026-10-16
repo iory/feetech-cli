@@ -110,3 +110,39 @@ def test_hardware_error_byte_raises():
 def test_describe_error_names_flags():
     assert describe_error(0) == ["none"]
     assert describe_error(0x05) == ["voltage", "overheat"]
+
+
+def test_sync_read_returns_each_servo_in_order():
+    servos = [FakeServo(1), FakeServo(4), FakeServo(2)]
+    handler = PacketHandler(FakeBus(servos))
+    handler.write(4, 42, handler.encode(2, 1000))  # goal_position
+    handler.write(1, 42, handler.encode(2, 3000))
+    answers = handler.sync_read([4, 1], 42, 2)
+    assert list(answers) == [4, 1]
+    assert handler.decode(2, answers[4][1]) == 1000
+    assert handler.decode(2, answers[1][1]) == 3000
+
+
+def test_sync_read_hands_back_an_error_byte_instead_of_raising():
+    servo = FakeServo(1)
+    servo.error = 0x20
+    handler = PacketHandler(FakeBus([servo, FakeServo(2)]))
+    answers = handler.sync_read([1, 2], 56, 2)
+    assert answers[1][0] == 0x20 and answers[2][0] == 0
+
+
+def test_sync_read_names_the_device_that_did_not_answer():
+    handler = PacketHandler(FakeBus([FakeServo(1)]))
+    with pytest.raises(FeetechTimeoutError, match="no answer from id 7"):
+        handler.sync_read([1, 7], 56, 2)
+
+
+def test_sync_read_skips_the_transmit_echo():
+    handler = PacketHandler(FakeBus([FakeServo(1), FakeServo(2)], echo=True))
+    assert list(handler.sync_read([1, 2], 56, 2)) == [1, 2]
+
+
+def test_sync_read_refuses_repeated_ids():
+    handler = PacketHandler(FakeBus([FakeServo(1)]))
+    with pytest.raises(ValueError):
+        handler.sync_read([1, 1], 56, 2)
