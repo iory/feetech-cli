@@ -331,3 +331,35 @@ def test_starting_on_a_quiet_bus_does_not_claim_to_have_lost_one(tui):
     lines = "\n".join(screen.build_lines({}))
     assert "No servo is answering" in lines
     assert "Lost the servo" not in lines
+
+
+def test_a_servo_in_alarm_stays_on_screen_with_the_alarm(tui):
+    """An over voltage servo still answers; it must not read as unplugged."""
+    screen, servos = tui
+    servos[0].error = 0x01  # voltage
+    values = screen.read_values()
+    assert screen.connected is True
+    assert values["present_voltage"] is not None
+    text = "\n".join(screen.build_lines(values))
+    assert "ALARM on servo 1: voltage" in text
+    assert "12.1 V is outside the servo's" in text
+    assert "No servo is answering" not in text
+
+
+def test_the_alarm_clears_once_the_servo_recovers(tui):
+    screen, servos = tui
+    servos[0].error = 0x01
+    screen.read_values()
+    servos[0].error = 0
+    text = "\n".join(screen.build_lines(screen.read_values()))
+    assert "ALARM" not in text
+
+
+def test_a_servo_in_alarm_is_picked_up_again(tui):
+    screen, servos = tui
+    screen.lose_bus(FeetechError("gone"))
+    alarmed = FakeServo(1)
+    alarmed.error = 0x01
+    screen.controller.serial.servos = [alarmed]
+    assert screen.rediscover() is True
+    assert screen.alarm == 0x01

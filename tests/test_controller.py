@@ -54,6 +54,13 @@ def test_scan_default_range_stops_at_16():
     assert controller.scan(max_id=20) == [1, 17]
 
 
+def test_scan_finds_a_servo_in_voltage_alarm():
+    servo = FakeServo(1)
+    servo.error = 0x01  # over the voltage limit, the LED blinks
+    controller, _ = make_controller([servo, FakeServo(4)])
+    assert controller.scan() == [1, 4]
+
+
 def test_read_register_decodes_sign_magnitude():
     servo = FakeServo(1)
     servo._store("homing_offset", 0x0800 | 100)  # sign bit 11 set

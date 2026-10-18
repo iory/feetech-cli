@@ -1,16 +1,20 @@
 """Interactive terminal UI for inspecting and reconfiguring servos."""
 
 import queue
+import shutil
 import sys
 import threading
 import time
 
 import readchar
+from colorama import Back
 from colorama import Fore
 from colorama import Style
 
 from feetech_cli.protocol import FeetechError
+from feetech_cli.protocol import FeetechStatusError
 from feetech_cli.protocol import FeetechTimeoutError
+from feetech_cli.protocol import describe_error
 from feetech_cli.registers import BAUDRATE_TABLE
 from feetech_cli.registers import CENTER_POSITION
 from feetech_cli.registers import OPERATING_MODES
@@ -18,6 +22,24 @@ from feetech_cli.registers import RESOLUTION
 from feetech_cli.registers import format_baud
 from feetech_cli.registers import format_current
 from feetech_cli.registers import position_to_degree
+
+#: Registers read only while the servo is in alarm, to say which limit it hit.
+ALARM_LIMIT_REGISTERS = [
+    "min_voltage_limit",
+    "max_voltage_limit",
+    "max_temperature_limit",
+]
+
+#: Widest the alarm banner gets, so it stays readable on a wide terminal.
+ALARM_BANNER_WIDTH = 72
+
+#: What to do about each error flag, shown under the alarm banner.
+ALARM_HINTS = {
+    "angle": "goal position is outside the position limits",
+    "over-element": "the servo reports a sensor fault",
+    "over-current": "the output stage drew too much current, check for a stall",
+    "overload": "the servo is overloaded, check that the horn can move freely",
+}
 
 #: Encoder counts moved per arrow key press, about five degrees.
 POSITION_STEP = RESOLUTION // 72
@@ -201,6 +223,8 @@ class ServoTui:
         self.candidate_index = 0
         self.message = ""
         self.values = {}
+        #: Error bits the active servo reported on its last refresh.
+        self.alarm = 0
         #: ``(question, action)`` while a destructive key waits for 'y'.
         self.pending_confirm = None
         #: False once the bus stops answering, until a servo is found again.
@@ -289,6 +313,10 @@ class ServoTui:
                         break
                     try:
                         self.handle_key(key)
+                    except FeetechStatusError as error:
+                        # The servo answered, so the bus is fine; it is in
+                        # alarm, which the next refresh shows as well.
+                        self.message = f"{Fore.RED}{error}{Style.RESET_ALL}"
                     except BUS_ERRORS as error:
                         self.lose_bus(error)
                         last_probe = None
@@ -321,6 +349,7 @@ class ServoTui:
         """
         self.connected = False
         self.values = {}
+        self.alarm = 0
         self.pending_confirm = None
         self.message = f"{Fore.RED}Lost the servo: {error}{Style.RESET_ALL}"
         if isinstance(error, OSError):
@@ -403,16 +432,80 @@ class ServoTui:
             Maps register name to value, with ``None`` for any register that
             could not be read.
         """
-        values = self.controller.dump(self.servo_id, STATUS_REGISTERS)
+        values, alarm = self.controller.dump_with_error(
+            self.servo_id, STATUS_REGISTERS
+        )
         if all(value is None for value in values.values()):
-            # dump() turns a per register failure into None so that one odd
-            # register cannot blank the screen. Everything failing means the
-            # servo is gone, which the caller has to know about.
+            # dump_with_error() turns a per register failure into None so that
+            # one odd register cannot blank the screen. Everything failing
+            # means the servo is gone, which the caller has to know about.
             raise FeetechTimeoutError(
                 f"servo {self.servo_id} stopped answering"
             )
+        if alarm:
+            limits, _ = self.controller.dump_with_error(
+                self.servo_id, ALARM_LIMIT_REGISTERS
+            )
+            values.update(limits)
         self.values = values
+        self.alarm = alarm
         return values
+
+    def alarm_lines(self, values):
+        """Build the banner shown while the servo reports an alarm.
+
+        Parameters
+        ----------
+        values : dict
+            Register values as returned by :meth:`read_values`.
+
+        Returns
+        -------
+        list of str
+            The banner and one hint per error flag.
+        """
+        width = min(shutil.get_terminal_size().columns, ALARM_BANNER_WIDTH)
+        style = Back.RED + Fore.WHITE + Style.BRIGHT
+        flags = describe_error(self.alarm)
+        title = f"!!! ALARM on servo {self.servo_id}: {', '.join(flags)} !!!"
+        lines = [style + title.center(width) + Style.RESET_ALL]
+        for flag in flags:
+            hint = self.alarm_hint(flag, values)
+            lines.append(f"{Fore.RED}{Style.BRIGHT}  -> {hint}{Style.RESET_ALL}")
+        return lines
+
+    def alarm_hint(self, flag, values):
+        """Explain one error flag, with the reading that tripped it.
+
+        Parameters
+        ----------
+        flag : str
+            A name from :func:`~feetech_cli.protocol.describe_error`.
+        values : dict
+            Register values as returned by :meth:`read_values`.
+
+        Returns
+        -------
+        str
+            One line of advice.
+        """
+        voltage = values.get("present_voltage")
+        low = values.get("min_voltage_limit")
+        high = values.get("max_voltage_limit")
+        if flag == "voltage" and None not in (voltage, low, high):
+            return (
+                f"supply {voltage / 10.0:.1f} V is outside the servo's "
+                f"{low / 10.0:.1f}-{high / 10.0:.1f} V range, fix the power supply"
+            )
+        temperature = values.get("present_temperature")
+        limit = values.get("max_temperature_limit")
+        if flag == "overheat" and None not in (temperature, limit):
+            return f"{temperature} C is above the {limit} C limit, let it cool down"
+        if flag == "voltage":
+            return "supply voltage is out of range, check the power supply"
+        if flag == "overheat":
+            return "the servo is too hot, let it cool down"
+        return ALARM_HINTS.get(flag, f"error flag '{flag}' is set")
 
     def build_lines(self, values):
         """Build the screen as a list of lines.
@@ -441,6 +534,8 @@ class ServoTui:
             f"Bus: {self.controller.serial.port} @ {speed}bps   Servos: {bus}",
             "",
         ]
+        if self.alarm:
+            lines[-1:-1] = self.alarm_lines(values)
         for index, row in enumerate(SELECTABLE_ROWS):
             text = self.render_row(row, values)
             if index == self.selected_row:

@@ -83,6 +83,37 @@ def test_transmit_echo_is_skipped():
     assert handler.decode(2, handler.read(1, 56, 2)) == 2048
 
 
+def voltage_alarm_servo(servo_id):
+    """A servo whose PING answer is byte for byte the PING request."""
+    servo = FakeServo(servo_id)
+    servo.error = 0x01  # voltage, same value as INST_PING
+    return servo
+
+
+@pytest.mark.parametrize("echo", [False, True])
+def test_ping_answer_identical_to_the_request_is_not_dropped(echo):
+    handler = PacketHandler(FakeBus([voltage_alarm_servo(1)], echo=echo))
+    assert handler.ping(1) is True
+    assert handler.echoes is echo
+
+
+@pytest.mark.parametrize("echo", [False, True])
+def test_echo_detection_does_not_invent_servos(echo):
+    handler = PacketHandler(FakeBus([voltage_alarm_servo(1)], echo=echo))
+    assert handler.ping(2) is False
+    assert handler.ping(1) is True
+    assert handler.ping(3) is False
+
+
+def test_echo_is_probed_only_once():
+    bus = FakeBus([voltage_alarm_servo(1)])
+    handler = PacketHandler(bus)
+    handler.ping(1)
+    handler.ping(1)
+    # Two pings and a single id read to learn the adapter does not echo.
+    assert len(bus.tx_log) == 3
+
+
 def test_timeout_when_nobody_answers():
     handler = PacketHandler(FakeBus([FakeServo(1)]))
     with pytest.raises(FeetechTimeoutError):

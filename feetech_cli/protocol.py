@@ -33,6 +33,10 @@ INST_SYNC_WRITE = 0x83
 #: Bytes read per call while draining stale replies off the bus.
 DRAIN_CHUNK = 256
 
+#: Address of the ``id`` register, the same on every FEETECH series. Reading
+#: it is how :class:`PacketHandler` finds out whether the adapter echoes.
+ID_ADDRESS = 5
+
 #: Hardware error bits reported in the ``ERROR`` byte of a status packet.
 ERROR_BITS = (
     (0x01, "voltage"),
@@ -185,6 +189,9 @@ class PacketHandler:
     def __init__(self, port, little_endian=True):
         self.port = port
         self.little_endian = little_endian
+        #: Whether the adapter echoes transmissions back, ``None`` until an
+        #: exchange has shown it one way or the other.
+        self.echoes = None
 
     def encode_word(self, value):
         """Split a 16 bit value into two bytes using the bus byte order.
@@ -369,6 +376,11 @@ class PacketHandler:
             first packet read is byte for byte identical to ``sent`` it is
             discarded and the next one is read instead.
 
+            A genuine answer can be identical too: a PING (instruction 0x01)
+            answered with the voltage error flag (0x01) and no parameters
+            reproduces the request exactly. When no second packet follows,
+            :meth:`_adapter_echoes` settles which of the two it was.
+
         Returns
         -------
         tuple of (int, int, bytes)
@@ -381,13 +393,52 @@ class PacketHandler:
         FeetechChecksumError
             If the packet checksum did not match.
         """
-        for _ in range(2):
-            servo_id, error, params, raw = self._read_one_packet()
-            if sent is not None and raw == sent:
-                # Adapter echoed our own transmission, read the real answer.
-                continue
+        servo_id, error, params, raw = self._read_one_packet()
+        if sent is None or raw != sent:
+            if sent is not None:
+                self.echoes = False
             return servo_id, error, params
-        raise FeetechTimeoutError("only the transmit echo was received")
+        if self.echoes is not False:
+            try:
+                servo_id, error, params, _ = self._read_one_packet()
+            except FeetechTimeoutError:
+                pass
+            else:
+                self.echoes = True
+                return servo_id, error, params
+        if self._adapter_echoes(servo_id):
+            raise FeetechTimeoutError("only the transmit echo was received")
+        return servo_id, error, params
+
+    def _adapter_echoes(self, servo_id):
+        """Find out whether the adapter echoes transmissions.
+
+        Reads the ``id`` register of ``servo_id``. That request is a
+        different size from its answer, so the two can never be mistaken for
+        each other: if the first packet back is the request itself, the
+        adapter echoes.
+
+        Parameters
+        ----------
+        servo_id : int
+            Servo to address with the probe.
+
+        Returns
+        -------
+        bool
+            The cached or freshly measured :attr:`echoes`.
+        """
+        if self.echoes is None:
+            probe = self.build_packet(servo_id, INST_READ, [ID_ADDRESS, 1])
+            self._send(probe)
+            try:
+                _, _, _, raw = self._read_one_packet()
+            except FeetechTimeoutError:
+                # An echoing adapter always sends something back.
+                raw = None
+            self.echoes = raw == probe
+            self.port.reset_input_buffer()
+        return self.echoes
 
     def _read_one_packet(self):
         """Scan for a header and read a single packet off the wire.
@@ -514,6 +565,35 @@ class PacketHandler:
                 f"expected {size} bytes from address {address}, received {len(answer)}"
             )
         return answer
+
+    def read_with_error(self, servo_id, address, size):
+        """Read a register and hand back the error byte instead of raising.
+
+        A servo in alarm (over voltage, overheat, ...) still returns valid
+        register contents; this lets the caller show them next to the alarm.
+
+        Parameters
+        ----------
+        servo_id : int
+            Servo id.
+        address : int
+            Register address.
+        size : int
+            Number of bytes to read.
+
+        Returns
+        -------
+        tuple of (int, bytes)
+            The error byte and the register contents.
+        """
+        error, answer = self.txrx(
+            servo_id, INST_READ, [address & 0xFF, size & 0xFF], raise_on_error=False
+        )
+        if len(answer) != size:
+            raise FeetechChecksumError(
+                f"expected {size} bytes from address {address}, received {len(answer)}"
+            )
+        return error, answer
 
     def sync_read(self, servo_ids, address, size):
         """Read the same registers of several devices in one SYNC_READ.

@@ -461,6 +461,30 @@ class FeetechServoController:
         data = self.packet_handler.read(servo_id, register.address, register.size)
         return self._decode_register(register, data)
 
+    def read_register_with_error(self, servo_id, name):
+        """Read a named register even while the servo reports an alarm.
+
+        Parameters
+        ----------
+        servo_id : int
+            Servo id.
+        name : str
+            Register name, a key of
+            :data:`~feetech_cli.registers.CONTROL_TABLE`.
+
+        Returns
+        -------
+        tuple of (int, int)
+            The register value, sign decoded where applicable, and the error
+            byte of the status packet that carried it.
+        """
+        self._require_open()
+        register = _lookup(name, self.device_profile(servo_id))
+        error, data = self.packet_handler.read_with_error(
+            servo_id, register.address, register.size
+        )
+        return self._decode_register(register, data), error
+
     def _decode_register(self, register, data):
         """Turn the bytes of one register into its value, sign decoded."""
         value = self.packet_handler.decode(register.size, data)
@@ -677,6 +701,37 @@ class FeetechServoController:
             except FeetechError:
                 result[name] = None
         return result
+
+    def dump_with_error(self, servo_id, names):
+        """Read several registers, keeping their values while in alarm.
+
+        :meth:`dump` maps a register whose status packet carries an error
+        byte to ``None``, so a servo in alarm reads as if it were absent.
+        This keeps the values and reports the error bits next to them.
+
+        Parameters
+        ----------
+        servo_id : int
+            Servo id.
+        names : sequence of str
+            Register names to read.
+
+        Returns
+        -------
+        tuple of (dict, int)
+            Register name to value, ``None`` for a register that could not be
+            read, and the error bits of every answer OR-ed together.
+        """
+        result = {}
+        error = 0
+        for name in names:
+            try:
+                result[name], flags = self.read_register_with_error(servo_id, name)
+            except FeetechError:
+                result[name] = None
+                continue
+            error |= flags
+        return result, error
 
     # -- configuration -----------------------------------------------------
 
