@@ -424,6 +424,9 @@ with key_input() as read_key:
         time.sleep(0.4)
 restored = termios.tcgetattr(sys.stdin.fileno()) == before
 print("GOT", repr(keys), "RESTORED", restored, flush=True)
+# macOS drops unread pty output once the child side closes, so stay until the
+# test has read the line and answers with a newline.
+sys.stdin.readline()
 """
 
 
@@ -440,12 +443,19 @@ def test_keys_typed_while_the_reader_is_busy_are_kept():
     )
     os.close(slave)
     output = b""
-    try:
+
+    def read_until(*needles):
+        """Collect the child's output until one of ``needles`` shows up."""
+        nonlocal output
         end = time.time() + TIMEOUT
-        while b"READY" not in output and time.time() < end:
+        while (not any(needle in output for needle in needles)
+               and time.time() < end):
             ready, _, _ = select.select([master], [], [], 0.05)
             if ready:
                 output += os.read(master, 65536)
+
+    try:
+        read_until(b"READY")
         os.write(master, b"a")
         time.sleep(0.1)
         os.write(master, b"b")         # reader asleep
@@ -453,18 +463,9 @@ def test_keys_typed_while_the_reader_is_busy_are_kept():
         os.write(master, RIGHT.encode())
         time.sleep(0.1)
         os.write(master, b"q")
+        read_until(b"RESTORED True", b"RESTORED False")
+        os.write(master, b"\n")
         process.wait(timeout=TIMEOUT)
-        while True:
-            ready, _, _ = select.select([master], [], [], 0.2)
-            if not ready:
-                break
-            try:
-                chunk = os.read(master, 65536)
-            except OSError:
-                break
-            if not chunk:
-                break
-            output += chunk
     finally:
         if process.poll() is None:
             process.kill()
