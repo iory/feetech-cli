@@ -16,6 +16,7 @@ from feetech_cli.devices import default_device_dir
 from feetech_cli.devices import format_value
 from feetech_cli.devices import load_profiles
 from feetech_cli.protocol import FeetechError
+from feetech_cli.protocol import describe_error
 from feetech_cli.registers import BAUDRATE_INDEX
 from feetech_cli.registers import BAUDRATE_TABLE
 from feetech_cli.registers import CENTER_POSITION
@@ -389,16 +390,30 @@ def command_scan(args, controller):
         if not profiles[servo_id].is_servo:
             print(_device_summary(controller, servo_id, profiles[servo_id]))
             continue
-        model = controller.read_register(servo_id, "model_number")
-        position = controller.read_register(servo_id, "present_position")
-        voltage = controller.read_register(servo_id, "present_voltage")
-        temperature = controller.read_register(servo_id, "present_temperature")
+        values = {}
+        error = 0
+        for name in (
+            "model_number",
+            "present_position",
+            "present_voltage",
+            "present_temperature",
+        ):
+            values[name], flags = controller.read_register_with_error(servo_id, name)
+            error |= flags
+        position = values["present_position"]
         degree = position_to_degree(position)
-        print(
-            f"  id {servo_id:>3}  model {model:>5}  "
+        line = (
+            f"  id {servo_id:>3}  model {values['model_number']:>5}  "
             f"position {position:>5} ({degree:+.1f} deg)  "
-            f"{voltage / 10.0:.1f}V  {temperature}C"
+            f"{values['present_voltage'] / 10.0:.1f}V  "
+            f"{values['present_temperature']}C"
         )
+        if error:
+            line += (
+                f"  {Fore.RED}ALARM: {', '.join(describe_error(error))}"
+                f"{Style.RESET_ALL}"
+            )
+        print(line)
     return 0
 
 

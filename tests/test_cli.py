@@ -59,6 +59,16 @@ def test_scan_lists_every_servo(bus, capsys):
     assert "id   4" in out
 
 
+def test_scan_shows_the_alarm_of_a_servo_over_its_voltage_limit(bus, capsys):
+    bus.servos[0].error = 0x01  # voltage
+    assert run(["scan"]) == 0
+    out = capsys.readouterr().out
+    assert "Found 2 servo(s)" in out
+    lines = {line.split()[1]: line for line in out.splitlines() if "  id " in line}
+    assert "ALARM: voltage" in lines["1"]
+    assert "ALARM" not in lines["4"]
+
+
 def test_info_prints_the_control_table(bus, capsys):
     assert run(["info", "1"]) == 0
     out = capsys.readouterr().out
