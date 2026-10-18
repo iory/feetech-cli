@@ -422,8 +422,15 @@ with key_input() as read_key:
     for _ in range(4):
         keys.append(read_key())
         time.sleep(0.4)
-restored = termios.tcgetattr(sys.stdin.fileno()) == before
-print("GOT", repr(keys), "RESTORED", restored, flush=True)
+after = termios.tcgetattr(sys.stdin.fileno())
+# Turning ICANON back on makes BSD kernels, macOS included, set PENDIN until
+# the next read reprocesses the input queue (xnu bsd/kern/tty.c, TIOCSETA).
+# It is kernel bookkeeping, not a setting the screen left behind.
+after[3] &= ~termios.PENDIN
+before[3] &= ~termios.PENDIN
+changed = [index for index in range(len(before)) if before[index] != after[index]]
+print("CHANGED", changed, before, after, flush=True)
+print("GOT", repr(keys), "RESTORED", not changed, flush=True)
 # macOS drops unread pty output once the child side closes, so stay until the
 # test has read the line and answers with a newline.
 sys.stdin.readline()
