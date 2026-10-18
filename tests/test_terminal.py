@@ -409,3 +409,65 @@ def test_zero_key_can_be_cancelled(screen):
 
 def test_quit_key_exits_cleanly(screen):
     assert screen.close() == 0
+
+
+#: Reads keys through key_input() while busy between reads, then prints them.
+BUSY_READER = r"""
+import sys, termios, time
+from feetech_cli.tui import key_input
+before = termios.tcgetattr(sys.stdin.fileno())
+keys = []
+with key_input() as read_key:
+    print("READY", flush=True)
+    for _ in range(4):
+        keys.append(read_key())
+        time.sleep(0.4)
+restored = termios.tcgetattr(sys.stdin.fileno()) == before
+print("GOT", repr(keys), "RESTORED", restored, flush=True)
+"""
+
+
+def test_keys_typed_while_the_reader_is_busy_are_kept():
+    """readchar flushed input on every read, dropping keys typed in between.
+
+    The writes land while the reader sleeps, which is exactly when
+    ``readchar.readkey`` used to throw them away.
+    """
+    master, slave = pty.openpty()
+    process = subprocess.Popen(
+        [sys.executable, "-c", BUSY_READER],
+        stdin=slave, stdout=slave, stderr=slave, close_fds=True,
+    )
+    os.close(slave)
+    output = b""
+    try:
+        end = time.time() + TIMEOUT
+        while b"READY" not in output and time.time() < end:
+            ready, _, _ = select.select([master], [], [], 0.05)
+            if ready:
+                output += os.read(master, 65536)
+        os.write(master, b"a")
+        time.sleep(0.1)
+        os.write(master, b"b")         # reader asleep
+        time.sleep(0.1)
+        os.write(master, RIGHT.encode())
+        time.sleep(0.1)
+        os.write(master, b"q")
+        process.wait(timeout=TIMEOUT)
+        while True:
+            ready, _, _ = select.select([master], [], [], 0.2)
+            if not ready:
+                break
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output += chunk
+    finally:
+        if process.poll() is None:
+            process.kill()
+        os.close(master)
+    text = output.decode("utf-8", "replace")
+    assert f"GOT {['a', 'b', RIGHT, 'q']!r} RESTORED True" in text, text
