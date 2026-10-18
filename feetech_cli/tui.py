@@ -1,5 +1,6 @@
 """Interactive terminal UI for inspecting and reconfiguring servos."""
 
+import contextlib
 import queue
 import shutil
 import sys
@@ -10,6 +11,7 @@ import readchar
 from colorama import Back
 from colorama import Fore
 from colorama import Style
+from readchar import config as readchar_config
 
 from feetech_cli.protocol import FeetechError
 from feetech_cli.protocol import FeetechStatusError
@@ -22,6 +24,11 @@ from feetech_cli.registers import RESOLUTION
 from feetech_cli.registers import format_baud
 from feetech_cli.registers import format_current
 from feetech_cli.registers import position_to_degree
+
+try:
+    import termios
+except ImportError:  # Windows, where readchar reads through msvcrt instead.
+    termios = None
 
 #: Registers read only while the servo is in alarm, to say which limit it hit.
 ALARM_LIMIT_REGISTERS = [
@@ -122,6 +129,80 @@ BUS_ERRORS = (FeetechError, OSError)
 #: discipline turns it into LF when ICRNL is set, which readchar leaves alone.
 ENTER_KEYS = (readchar.key.ENTER, "\r", "\n")
 
+#: Characters that may follow ESC, ESC [ and so on in a key sequence. The same
+#: decoding ``readchar.readkey`` does, see readchar/_posix_read.py.
+ESCAPE_CONTINUATIONS = (
+    "\x4F\x5B",
+    "\x31\x32\x33\x35\x36",
+    "\x30\x31\x33\x34\x35\x37\x38\x39",
+)
+
+
+def _read_char():
+    """Read one character from stdin, raising :class:`EOFError` at its end."""
+    char = sys.stdin.read(1)
+    if not char:
+        raise EOFError("stdin closed")
+    return char
+
+
+def _read_key_posix():
+    """Read one key press from a terminal already in non canonical mode.
+
+    Returns
+    -------
+    str
+        The key, a full escape sequence for arrows and the like.
+    """
+    key = _read_char()
+    if key in readchar_config.INTERRUPT_KEYS:
+        raise KeyboardInterrupt
+    if key != "\x1b":
+        return key
+    for continuations in ESCAPE_CONTINUATIONS:
+        char = _read_char()
+        key += char
+        if char not in continuations:
+            return key
+    return key + _read_char()
+
+
+@contextlib.contextmanager
+def key_input():
+    """Put the terminal in key at a time mode for as long as the screen runs.
+
+    ``readchar.readkey`` switches the terminal mode around every character
+    with ``TCSAFLUSH``, which throws away whatever was typed while no read was
+    pending: before the listener's first read, and between two reads. Keys
+    pressed then were lost. Switching once here, without flushing, keeps
+    every key.
+
+    Yields
+    ------
+    callable
+        Reads one key press and returns it.
+    """
+    if termios is None:
+        yield readchar.readkey
+        return
+    fd = sys.stdin.fileno()
+    try:
+        saved = termios.tcgetattr(fd)
+    except termios.error:
+        # Not a terminal. readchar.readkey raises the same error, which stops
+        # the listener just as it did before.
+        yield readchar.readkey
+        return
+    mode = termios.tcgetattr(fd)
+    mode[3] &= ~(termios.ICANON | termios.ECHO)
+    mode[6][termios.VMIN] = 1
+    mode[6][termios.VTIME] = 0
+    termios.tcsetattr(fd, termios.TCSANOW, mode)
+    try:
+        yield _read_key_posix
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
 
 class KeyListener(threading.Thread):
     """Read key presses in the background.
@@ -131,8 +212,9 @@ class KeyListener(threading.Thread):
     the screen feel stuck.
     """
 
-    def __init__(self):
+    def __init__(self, read_key=readchar.readkey):
         super().__init__()
+        self.read_key = read_key
         self.keys = queue.Queue()
         self.running = True
 
@@ -140,7 +222,7 @@ class KeyListener(threading.Thread):
         """Queue key presses until the listener is stopped."""
         while self.running:
             try:
-                key = readchar.readkey()
+                key = self.read_key()
             except KeyboardInterrupt:
                 self.keys.put("q")
                 self.stop()
@@ -253,7 +335,18 @@ class ServoTui:
         holding down an arrow key does not flood the bus, and the screen is
         repainted only when something actually changed.
         """
-        listener = KeyListener()
+        with key_input() as read_key:
+            self._run(read_key)
+
+    def _run(self, read_key):
+        """Body of :meth:`run`, with the terminal already set up for keys.
+
+        Parameters
+        ----------
+        read_key : callable
+            Reads one key press, from :func:`key_input`.
+        """
+        listener = KeyListener(read_key)
         listener.daemon = True
         listener.start()
         if self.connected:

@@ -409,3 +409,73 @@ def test_zero_key_can_be_cancelled(screen):
 
 def test_quit_key_exits_cleanly(screen):
     assert screen.close() == 0
+
+
+#: Reads keys through key_input() while busy between reads, then prints them.
+BUSY_READER = r"""
+import sys, termios, time
+from feetech_cli.tui import key_input
+before = termios.tcgetattr(sys.stdin.fileno())
+keys = []
+with key_input() as read_key:
+    print("READY", flush=True)
+    for _ in range(4):
+        keys.append(read_key())
+        time.sleep(0.4)
+after = termios.tcgetattr(sys.stdin.fileno())
+# Turning ICANON back on makes BSD kernels, macOS included, set PENDIN until
+# the next read reprocesses the input queue (xnu bsd/kern/tty.c, TIOCSETA).
+# It is kernel bookkeeping, not a setting the screen left behind.
+after[3] &= ~termios.PENDIN
+before[3] &= ~termios.PENDIN
+changed = [index for index in range(len(before)) if before[index] != after[index]]
+print("CHANGED", changed, before, after, flush=True)
+print("GOT", repr(keys), "RESTORED", not changed, flush=True)
+# macOS drops unread pty output once the child side closes, so stay until the
+# test has read the line and answers with a newline.
+sys.stdin.readline()
+"""
+
+
+def test_keys_typed_while_the_reader_is_busy_are_kept():
+    """readchar flushed input on every read, dropping keys typed in between.
+
+    The writes land while the reader sleeps, which is exactly when
+    ``readchar.readkey`` used to throw them away.
+    """
+    master, slave = pty.openpty()
+    process = subprocess.Popen(
+        [sys.executable, "-c", BUSY_READER],
+        stdin=slave, stdout=slave, stderr=slave, close_fds=True,
+    )
+    os.close(slave)
+    output = b""
+
+    def read_until(*needles):
+        """Collect the child's output until one of ``needles`` shows up."""
+        nonlocal output
+        end = time.time() + TIMEOUT
+        while (not any(needle in output for needle in needles)
+               and time.time() < end):
+            ready, _, _ = select.select([master], [], [], 0.05)
+            if ready:
+                output += os.read(master, 65536)
+
+    try:
+        read_until(b"READY")
+        os.write(master, b"a")
+        time.sleep(0.1)
+        os.write(master, b"b")         # reader asleep
+        time.sleep(0.1)
+        os.write(master, RIGHT.encode())
+        time.sleep(0.1)
+        os.write(master, b"q")
+        read_until(b"RESTORED True", b"RESTORED False")
+        os.write(master, b"\n")
+        process.wait(timeout=TIMEOUT)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        os.close(master)
+    text = output.decode("utf-8", "replace")
+    assert f"GOT {['a', 'b', RIGHT, 'q']!r} RESTORED True" in text, text
