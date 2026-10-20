@@ -7,7 +7,7 @@ from feetech_cli.protocol import FeetechStatusError
 from feetech_cli.protocol import FeetechTimeoutError
 from feetech_cli.protocol import PacketHandler
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 __all__ = [
     "FeetechServoController",
