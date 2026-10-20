@@ -1,6 +1,6 @@
 [project]
 name = "feetech-cli"
-version = "0.1.6"
+version = "0.1.7"
 description = "Command line tool to inspect and configure FEETECH STS/SMS/SCS serial bus servos"
 readme = "README.md"
 requires-python = ">=3.9"
