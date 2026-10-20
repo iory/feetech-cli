@@ -84,19 +84,24 @@ class Screen:
         return CURSOR_CODES.sub("", self.buffer.decode("utf-8", "replace"))
 
     def highlighted(self):
-        """Return the id candidate currently painted green.
+        """Return the id candidate painted green in the most recent frame.
+
+        The last match, like :meth:`line` and :meth:`row`. :meth:`forget`
+        only drops what was already read: frames painted before a key press
+        was handled can still be waiting in the pty, and the first match then
+        comes from one of those.
 
         Returns
         -------
         str or None
             The highlighted text, or ``None`` when nothing is highlighted.
         """
-        match = re.search(
+        hits = re.findall(
             re.escape(GREEN) + r"(\d+)" + re.escape(RESET), self.coloured
         )
-        if match is None:
+        if not hits:
             return None
-        return match.group(1)
+        return hits[-1]
 
     def line(self, needle):
         """Return the most recently painted line containing ``needle``.
