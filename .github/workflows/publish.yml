@@ -2,6 +2,8 @@ name: publish
 
 # Push a tag named after the version in pyproject.toml, e.g. v0.1.0, to
 # release. PyPI trusts this workflow through OIDC; no API token is stored.
+# Once published, a GitHub Release with the wheel and sdist is created for
+# the tag, its notes generated from the merged pull requests.
 
 on:
   push:
@@ -48,3 +50,20 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Create the GitHub Release with the built files
+        run: >-
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
