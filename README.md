@@ -1,5 +1,9 @@
 # feetech-cli
 
+![PyPI](https://img.shields.io/pypi/v/feetech-cli.svg)
+![Python Versions](https://img.shields.io/pypi/pyversions/feetech-cli.svg)
+[![Build Status](https://github.com/iory/feetech-cli/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/iory/feetech-cli/actions)
+
 Command line tool to inspect and configure FEETECH STS/SMS/SCS serial bus
 servos (STS3215 and friends) — change servo ids, bus speeds, modes and limits,
 or watch a live status screen.
