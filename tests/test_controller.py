@@ -1,10 +1,14 @@
 """Tests for the high level controller against a simulated bus."""
 
+import os
+import sys
+
 import pytest
 from fake_servo import FakeBus
 from fake_servo import FakeServo
 
 from feetech_cli.controller import FeetechServoController
+from feetech_cli.controller import PortNotFoundError
 from feetech_cli.protocol import FeetechError
 from feetech_cli.registers import BAUDRATE_INDEX
 
@@ -360,3 +364,29 @@ def test_sync_write_rejects_ragged_entries():
     controller, _ = make_controller([FakeServo(1)])
     with pytest.raises(ValueError, match="same length"):
         controller.packet_handler.sync_write(42, [(1, [0, 0]), (2, [0])])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs a POSIX pty")
+def test_open_refuses_a_port_another_controller_holds():
+    master, slave = os.openpty()
+    device = os.ttyname(slave)
+    # A standard speed: macOS sets others through an ioctl a pty refuses.
+    first = FeetechServoController(port=device, baudrate=115200, max_id=1)
+    second = FeetechServoController(port=device, baudrate=115200, max_id=1)
+    try:
+        # Open without scanning: nothing written to the pty, so closing it
+        # never waits on output no one reads.
+        first._open_port(device, 115200)
+        # A refused open sends nothing before it fails.
+        with pytest.raises(PortNotFoundError, match="could not open"):
+            second.open(require_servo=False)
+        assert not second.is_open
+        first.close()
+        # Released on close, so the next process gets the port.
+        second._open_port(device, 115200)
+        assert second.is_open
+    finally:
+        first.close()
+        second.close()
+        os.close(master)
+        os.close(slave)

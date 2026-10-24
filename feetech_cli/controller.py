@@ -240,7 +240,11 @@ class FeetechServoController:
             Bus speed.
         """
         self.close()
-        self.serial = serial.Serial(device, baudrate, timeout=self.timeout)
+        # Two processes on one bus steal each other's replies; refuse to share
+        # the port (a flock on POSIX, which is what a second open hits).
+        self.serial = serial.Serial(
+            device, baudrate, timeout=self.timeout, exclusive=True
+        )
         self.baudrate = baudrate
         self.packet_handler = PacketHandler(
             self.serial, little_endian=self.little_endian
