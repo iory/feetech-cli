@@ -22,11 +22,12 @@ def bus(monkeypatch):
     servos = [FakeServo(1), FakeServo(4)]
     fake = FakeBus(servos)
 
-    def fake_serial(device, baudrate, timeout=None):
+    def fake_serial(device, baudrate, timeout=None, exclusive=None):
         """Hand back the same bus whatever device is opened."""
         fake.port = device
         fake.baudrate = baudrate
         fake.timeout = timeout
+        fake.exclusive = exclusive
         fake.is_open = True
         fake.rx = bytearray()
         return fake
