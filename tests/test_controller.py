@@ -2,6 +2,7 @@
 
 import os
 import sys
+import threading
 
 import pytest
 from fake_servo import FakeBus
@@ -370,6 +371,17 @@ def test_sync_write_rejects_ragged_entries():
 def test_open_refuses_a_port_another_controller_holds():
     master, slave = os.openpty()
     device = os.ttyname(slave)
+
+    def drain():
+        """Read what the scans send: macOS will not close a pty with output pending."""
+        while True:
+            try:
+                if not os.read(master, 1024):
+                    return
+            except OSError:
+                return
+
+    threading.Thread(target=drain, daemon=True).start()
     # A standard speed: macOS sets others through an ioctl a pty refuses.
     first = FeetechServoController(port=device, baudrate=115200, max_id=1)
     second = FeetechServoController(port=device, baudrate=115200, max_id=1)
