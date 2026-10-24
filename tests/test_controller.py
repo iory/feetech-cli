@@ -370,8 +370,9 @@ def test_sync_write_rejects_ragged_entries():
 def test_open_refuses_a_port_another_controller_holds():
     master, slave = os.openpty()
     device = os.ttyname(slave)
-    first = FeetechServoController(port=device, baudrate=1000000, max_id=1)
-    second = FeetechServoController(port=device, baudrate=1000000, max_id=1)
+    # A standard speed: macOS sets others through an ioctl a pty refuses.
+    first = FeetechServoController(port=device, baudrate=115200, max_id=1)
+    second = FeetechServoController(port=device, baudrate=115200, max_id=1)
     try:
         first.open(require_servo=False)
         assert first.is_open
