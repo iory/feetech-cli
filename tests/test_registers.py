@@ -27,3 +27,14 @@ def test_format_current_estimates_supply_from_pwm_duty():
 
 def test_format_current_leaves_unknown_model_unconverted():
     assert format_current(-147, 1234) == "-147 (mA scale unknown for model 1234)"
+
+
+def test_version_is_the_one_in_pyproject():
+    import re
+    from pathlib import Path
+
+    import feetech_cli
+
+    pyproject = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+    declared = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE).group(1)
+    assert feetech_cli.__version__ == declared

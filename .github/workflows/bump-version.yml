@@ -1,0 +1,45 @@
+name: bump-version
+
+# Run by hand from the Actions tab: bumps the version in pyproject.toml and
+# opens a pull request labelled auto-merge-ok and release. release.yml merges
+# it once the tests pass and pushes the tag, and the tag starts publish.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'Version bump type'
+        type: choice
+        required: true
+        default: 'patch'
+        options:
+          - major
+          - minor
+          - patch
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Bump the version and open the pull request
+        id: bump
+        uses: iory/github-action-bump-version@v1.1.0
+        with:
+          bump_type: ${{ github.event.inputs.bump_type }}
+          # A pull request opened with GITHUB_TOKEN would not start test.yml.
+          github_token: ${{ secrets.AUTO_MERGE_PAT }}
+          base_branch: 'main'
+          labels: 'auto-merge-ok,release'
+
+      - name: Print the versions
+        run: |
+          echo "Current version: ${{ steps.bump.outputs.current_version }}"
+          echo "New version: ${{ steps.bump.outputs.new_version }}"

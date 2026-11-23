@@ -1,0 +1,79 @@
+name: release
+
+# Finishes what bump-version.yml starts. When test.yml passes on a pull request
+# labelled auto-merge-ok, the pull request is merged; when it is also labelled
+# release, the merge commit is tagged vX.Y.Z from pyproject.toml. The tag push
+# starts publish.yml, which publishes to PyPI (trusted publishing) and creates
+# the GitHub Release.
+#
+# Both the merge and the tag push use AUTO_MERGE_PAT: a tag pushed with
+# GITHUB_TOKEN does not start other workflows, so it would never reach
+# publish.yml. Only maintainers can add labels, so a pull request from a fork
+# cannot ask for either.
+
+on:
+  workflow_run:
+    workflows: [test]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  merge-and-tag:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Find the pull request the tests ran on
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$HEAD_BRANCH" --state open \
+                 --json number,headRefOid,labels \
+                 --jq ".[] | select(.headRefOid == \"$HEAD_SHA\")")
+          if [ -z "$pr" ]; then
+            echo "No open pull request at $HEAD_SHA; nothing to do."
+            exit 0
+          fi
+          {
+            echo "number=$(jq -r .number <<<"$pr")"
+            echo "auto_merge=$(jq -r '[.labels[].name] | index("auto-merge-ok") != null' <<<"$pr")"
+            echo "release=$(jq -r '[.labels[].name] | index("release") != null' <<<"$pr")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Merge it
+        id: merge
+        if: steps.pr.outputs.auto_merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_PAT }}
+          NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          # --match-head-commit: never merge a commit the tests did not see.
+          gh pr merge "$NUMBER" --repo "$GITHUB_REPOSITORY" --squash --delete-branch \
+            --match-head-commit "$HEAD_SHA"
+          echo "commit=$(gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json mergeCommit --jq .mergeCommit.oid)" \
+            >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+        if: steps.merge.outputs.commit != '' && steps.pr.outputs.release == 'true'
+        with:
+          ref: ${{ steps.merge.outputs.commit }}
+          token: ${{ secrets.AUTO_MERGE_PAT }}
+
+      - name: Tag the merge commit
+        if: steps.merge.outputs.commit != '' && steps.pr.outputs.release == 'true'
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists; not releasing again."
+            exit 1
+          fi
+          git tag "${tag}"
+          git push origin "${tag}"
+          echo "Pushed ${tag}; publish.yml takes it from here."
