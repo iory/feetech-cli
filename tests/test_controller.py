@@ -390,3 +390,50 @@ def test_open_refuses_a_port_another_controller_holds():
         second.close()
         os.close(master)
         os.close(slave)
+
+
+def _detecting_controller(servos, bus_baudrate, probe_ids=()):
+    """Build a controller that has to detect the bus speed itself.
+
+    Parameters
+    ----------
+    servos : sequence of FakeServo
+        Servos on the bus.
+    bus_baudrate : int
+        Speed the servos really run at.
+    probe_ids : sequence of int, optional
+        Ids named on the command line.
+
+    Returns
+    -------
+    FeetechServoController
+        A controller that has not been opened yet.
+    """
+    bus = FakeBus(servos, baudrate=bus_baudrate)
+    controller = FeetechServoController(port="/dev/fake", baudrate=None, probe_ids=probe_ids)
+
+    def open_port(device, rate):
+        """Swap in the simulated bus; servos answer only at their own speed."""
+        bus.is_open = True
+        bus.baudrate = rate
+        controller.serial = bus
+        controller.baudrate = rate
+        from feetech_cli.protocol import PacketHandler
+        controller.packet_handler = PacketHandler(bus, little_endian=True)
+
+    controller._open_port = open_port
+    return controller
+
+
+def test_speed_detection_also_pings_a_named_id_above_the_range():
+    controller = _detecting_controller([FakeServo(19)], 1000000, probe_ids=[19])
+    assert controller.open() == [19]
+    assert controller.baudrate == 1000000
+
+
+def test_speed_detection_without_a_named_id_keeps_to_the_range():
+    from feetech_cli.controller import NoServoFoundError
+
+    controller = _detecting_controller([FakeServo(19)], 1000000)
+    with pytest.raises(NoServoFoundError):
+        controller.open()

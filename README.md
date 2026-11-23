@@ -108,7 +108,11 @@ up to you.
 
 If `scan` finds nothing, the servo may have been set to another bus speed
 before. `feetech scan --all-baudrates` tries every speed. Servos with an id
-above 16 need `--max-id 253`.
+above 16 need `--max-id 253` to be found by `scan`.
+
+Commands that name an id (`info 19`, `read 19 ...`, `set-id 19 3`, ...) also
+probe that id while they look for the bus speed, so they work without
+`--baudrate` or `--max-id` even when the id is outside 1-16.
 
 ### What set-id does
 
