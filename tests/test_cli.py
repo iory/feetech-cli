@@ -160,3 +160,15 @@ def test_scan_respects_max_id(bus, capsys):
 def test_registers_command_needs_no_hardware(capsys):
     assert cli.main(["registers"]) == 0
     assert "goal_position" in capsys.readouterr().out
+
+
+def test_commands_probe_the_id_they_name():
+    from feetech_cli.cli import build_parser
+    from feetech_cli.cli import named_ids
+
+    parser = build_parser()
+    assert named_ids(parser.parse_args(["info", "19"])) == [19]
+    assert named_ids(parser.parse_args(["write", "19", "valve_state", "1"])) == [19]
+    assert named_ids(parser.parse_args(["set-id", "19", "3"])) == [19]
+    assert named_ids(parser.parse_args(["info"])) == []
+    assert named_ids(parser.parse_args(["scan"])) == []

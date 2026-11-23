@@ -110,6 +110,13 @@ class FeetechServoController:
         Lowest servo id used when probing the bus.
     max_id : int, optional
         Highest servo id used when probing the bus.
+    device_profiles : sequence of DeviceProfile, optional
+        Device files loaded for this bus.
+    probe_ids : sequence of int, optional
+        Ids probed as well as ``min_id`` .. ``max_id`` when :meth:`open`
+        looks for the bus speed: the ids a command names. Without them a
+        command naming id 19 could not find the speed at all, because the
+        default range stops at 16.
     """
 
     def __init__(
@@ -121,6 +128,7 @@ class FeetechServoController:
         min_id=DEFAULT_MIN_ID,
         max_id=DEFAULT_MAX_ID,
         device_profiles=(),
+        probe_ids=(),
     ):
         self.requested_port = port
         self.requested_baudrate = baudrate
@@ -142,6 +150,7 @@ class FeetechServoController:
         #: Device files loaded for this bus (:func:`~feetech_cli.devices.load_profiles`).
         #: Empty means every id is a servo and nothing is probed.
         self.device_profiles = list(device_profiles)
+        self.probe_ids = list(probe_ids)
 
     # -- connection --------------------------------------------------------
 
@@ -199,8 +208,8 @@ class FeetechServoController:
                 if self.requested_baudrate is not None:
                     # The user pinned the speed, report what is there but do
                     # not reject the port when the bus is quiet.
-                    return self.scan()
-                found = self.scan()
+                    return self._scan_with_probe_ids()
+                found = self._scan_with_probe_ids()
                 if found:
                     return found
                 self.close()
@@ -344,6 +353,23 @@ class FeetechServoController:
             if progress is not None:
                 progress(servo_id, answered)
         return found
+
+    def _scan_with_probe_ids(self):
+        """Scan the id range, then ping each of ``probe_ids`` outside it.
+
+        Returns
+        -------
+        list of int
+            Ids that answered, in ascending order.
+        """
+        found = self.scan()
+        for servo_id in self.probe_ids:
+            if servo_id in found or servo_id == BROADCAST_ID:
+                continue
+            self.profiles.pop(servo_id, None)
+            if self.packet_handler.ping(servo_id):
+                found.append(servo_id)
+        return sorted(found)
 
     def scan_all_baudrates(self, min_id=None, max_id=None, progress=None):
         """Probe every supported bus speed and report the servos found.

@@ -268,7 +268,32 @@ def make_controller(args):
         min_id=args.min_id,
         max_id=args.max_id,
         device_profiles=args.device_profiles,
+        probe_ids=named_ids(args),
     )
+
+
+def named_ids(args):
+    """Ids a command names on its command line.
+
+    They are probed while the bus speed is detected, so ``info 19`` finds
+    the speed even though the default id range stops at 16.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed arguments.
+
+    Returns
+    -------
+    list of int
+        The ids, possibly empty.
+    """
+    ids = []
+    for name in ("id", "old_id"):
+        value = getattr(args, name, None)
+        if value is not None:
+            ids.append(value)
+    return ids
 
 
 def attach_simulator(controller, args):
